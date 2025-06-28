@@ -247,27 +247,68 @@ Return only valid JSON with intent and entities. Be precise and concise.
         return {"intent": intent, "entities": entities}
 
     def _extract_title(self, message: str) -> Optional[str]:
-        """Extract meeting title from message"""
-        message_lower = message.lower()
+        """FIXED: Extract meeting title from message with better simple title detection"""
+        message_lower = message.lower().strip()
         
-        # Common patterns for titles
+        # Handle explicit title statements first
+        if "purpose" in message_lower or "topic" in message_lower:
+            # Extract from "the purpose is X" or "topic is X"
+            purpose_patterns = [
+                r'(?:purpose|topic)\s+is\s+(.+)',
+                r'(?:it\'s|its)\s+(?:about|for)\s+(.+)',
+                r'(?:the\s+)?(?:purpose|topic):\s*(.+)',
+                r'"(.+)"\s+is\s+the\s+(?:purpose|topic)'
+            ]
+            
+            for pattern in purpose_patterns:
+                match = re.search(pattern, message_lower)
+                if match:
+                    title = match.group(1).strip().strip('"\'')
+                    return title.title()
+        
+        # Common patterns for titles in longer sentences
         patterns = [
             r'(?:meeting|call|session)\s+(?:about|regarding|on)\s+([^,\.]+)',
             r'(?:schedule|book)\s+(?:a\s+)?(?:meeting|call)\s+(?:about|regarding|on)\s+([^,\.]+)',
             r'discuss\s+([^,\.]+)',
             r'talk\s+about\s+([^,\.]+)',
+            r'(?:have\s+a\s+)?(?:meeting|call)\s+(?:to\s+)?(?:discuss\s+)?([^,\.]+)',
         ]
         
         for pattern in patterns:
             match = re.search(pattern, message_lower)
             if match:
                 title = match.group(1).strip()
+                # Clean up the title
+                title = re.sub(r'\s+', ' ', title)  # Remove extra spaces
                 return title.title()
-        
-        # If it's a simple word/phrase and looks like a title
+
+        # FIXED: Better simple word/phrase detection
         words = message.strip().split()
-        if len(words) <= 3 and not any(word in message_lower for word in ['time', 'hour', 'minute', 'pm', 'am', 'today', 'tomorrow']):
-            return message.strip().title()
+        
+        # Skip obvious non-titles
+        skip_words = ['time', 'hour', 'minute', 'pm', 'am', 'today', 'tomorrow', 'yes', 'no', 'ok', 'okay']
+        
+        # If it's 1-4 words and doesn't contain time-related words
+        if 1 <= len(words) <= 4:
+            # Check if any word is in skip_words
+            if not any(word.lower() in skip_words for word in words):
+                # Additional check: avoid sentences with question words
+                question_words = ['what', 'when', 'where', 'how', 'why', 'who', 'which']
+                if not any(word.lower() in question_words for word in words):
+                    # FIXED: This should catch "casual call", "project review", etc.
+                    title = message.strip()
+                    print(f"🎯 Detected simple title: '{title}'")
+                    return title.title()
+        
+        # Handle quoted text as titles
+        quoted_match = re.search(r'"([^"]+)"', message)
+        if quoted_match:
+            return quoted_match.group(1).title()
+        
+        # Single word titles (but avoid obvious non-titles)
+        if len(words) == 1 and words[0].lower() not in skip_words and len(words[0]) > 2:
+            return words[0].title()
         
         return None
 

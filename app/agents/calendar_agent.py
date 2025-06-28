@@ -277,8 +277,28 @@ class CalendarBookingAgent:
                             entities[key] = [str(value)] if str(value).strip() else []
                         print(f"👥 Updated attendees: {entities[key]}")
 
+
             # Handle generic time defaults
             entities = self._handle_generic_time_defaults(entities)
+
+            # FIXED: Enhanced title detection for simple responses
+            if not entities.get("title") and state.get("conversation_stage") == "asking_title":
+                # If we're specifically asking for title and don't have one yet
+                # Be more liberal in accepting the response as a title
+                last_message_clean = last_message.strip().strip('"\'')
+                # Avoid obvious non-titles
+                non_title_phrases = [
+                    "i don't know", 'not sure', 'whatever', 'anything', 'nothing specific',
+                    'just a meeting', 'regular meeting', 'normal meeting'
+                ]
+                if (
+                    last_message_clean and
+                    len(last_message_clean.split()) <= 6 and
+                    not any(phrase in last_message.lower() for phrase in non_title_phrases) and
+                    not any(word in last_message.lower() for word in ['when', 'what', 'how', 'where', 'time'])
+                ):
+                    entities["title"] = last_message_clean.title()
+                    print(f"🎯 Force-detected title from asking_title stage: '{entities['title']}'")
 
             # Handle "no attendees" responses
             if self._is_no_attendees_response(last_message):
