@@ -1,9 +1,11 @@
+
 import logging
 import traceback
 import tempfile
 import json
 import os
 import pickle
+import pytz
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
@@ -11,6 +13,11 @@ from google_auth_oauthlib.flow import Flow
 from typing import List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
+def get_ist_time() -> datetime:
+    """Get current time in IST"""
+    ist_tz = pytz.timezone('Asia/Kolkata')
+    utc_now = datetime.utcnow()
+    return utc_now.replace(tzinfo=pytz.UTC).astimezone(ist_tz).replace(tzinfo=None)
 
 from .models.schemas import ChatMessage, ChatResponse, ConversationState, MessageRole
 from .agents.calendar_agent import CalendarBookingAgent
@@ -293,10 +300,12 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="default")):
-    """Chat endpoint with authentication check"""
+    """Chat endpoint with IST timestamps"""
     try:
-        logger.info(f"📨 Received message: {message.content[:100]}... for session: {session_id}")
-        
+        # FIXED: Use IST time for logging
+        ist_time = get_ist_time()
+        logger.info(f"📨 Received message at {ist_time.strftime('%Y-%m-%d %H:%M:%S IST')}: {message.content[:100]}... for session: {session_id}")
+
         if calendar_agent is None:
             logger.error("❌ Calendar agent not initialized")
             raise HTTPException(
@@ -325,14 +334,13 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
         if session_id not in conversations:
             conversations[session_id] = ConversationState()
             logger.info(f"🆕 Created new conversation for session: {session_id}")
-        
+
         conversation = conversations[session_id]
 
         # Check if we should reset conversation after successful booking
         if (hasattr(conversation, 'conversation_stage') and 
             conversation.conversation_stage == "booking_confirmed" and
             message.content.lower() not in ['yes', 'no', 'ok', 'thanks', 'thank you']):
-            
             logger.info("🔄 Auto-resetting conversation after successful booking")
             conversation.extracted_entities = {}
             conversation.calendar_availability = None
@@ -340,11 +348,22 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             conversation.conversation_stage = "initial"
             conversation.user_intent = None
 
-        # Add user message with timestamp
+        # FIXED: Handle cancellation by resetting conversation
+        if (hasattr(conversation, 'conversation_stage') and 
+            conversation.conversation_stage == "booking_cancelled"):
+            logger.info("❌ User cancelled booking, resetting conversation")
+            # Reset conversation for fresh start
+            conversation.extracted_entities = {}
+            conversation.calendar_availability = None
+            conversation.current_booking = None
+            conversation.conversation_stage = "initial"
+            conversation.user_intent = None
+
+        # Add user message with IST timestamp
         user_message = ChatMessage(
             role=MessageRole.USER,
             content=message.content,
-            timestamp=datetime.now()
+            timestamp=ist_time  # FIXED: Use IST time
         )
         conversation.messages.append(user_message)
 
@@ -356,27 +375,15 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
         except Exception as agent_error:
             logger.error(f"❌ Agent processing failed: {agent_error}")
             logger.error(f"Agent error traceback: {traceback.format_exc()}")
-            
-            # Add fallback message
+
+            # Add fallback message with IST timestamp
             fallback_message = ChatMessage(
                 role=MessageRole.ASSISTANT,
                 content="I'm here to help you schedule meetings. What would you like to book?",
-                timestamp=datetime.now()
+                timestamp=ist_time  # FIXED: Use IST time
             )
             conversation.messages.append(fallback_message)
             updated_conversation = conversation
-
-
-        # FIXED: Handle cancellation by resetting conversation
-        if (hasattr(updated_conversation, 'conversation_stage') and 
-            updated_conversation.conversation_stage == "booking_cancelled"):
-            logger.info("❌ User cancelled booking, resetting conversation")
-            # Reset conversation for fresh start
-            updated_conversation.extracted_entities = {}
-            updated_conversation.calendar_availability = None
-            updated_conversation.current_booking = None
-            updated_conversation.conversation_stage = "initial"
-            updated_conversation.user_intent = None
 
         # Update stored conversation
         conversations[session_id] = updated_conversation
@@ -386,7 +393,7 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             msg for msg in updated_conversation.messages
             if msg.role == MessageRole.ASSISTANT
         ]
-        
+
         if assistant_messages:
             latest_response = assistant_messages[-1].content
             logger.info(f"📤 Assistant response: {latest_response[:100]}...")
@@ -407,7 +414,6 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
                 updated_conversation.current_booking.get('id') and
                 hasattr(updated_conversation, 'conversation_stage') and
                 updated_conversation.conversation_stage == "booking_confirmed"):
-                
                 booking_data = updated_conversation.current_booking
                 logger.info(f"📅 CONFIRMED Booking: {booking_data.get('id')}")
 
@@ -416,7 +422,6 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
                   updated_conversation.calendar_availability and
                   hasattr(updated_conversation, 'conversation_stage') and
                   updated_conversation.conversation_stage in ["showing_slots", "showing_alternative_slots"]):
-                
                 suggested_times = [
                     slot.get("display", slot.get("start", "Available"))
                     for slot in updated_conversation.calendar_availability[:8]
@@ -441,13 +446,14 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             requires_confirmation=requires_confirmation
         )
 
-        logger.info(f"✅ Response prepared - Booking: {'Yes' if booking_data else 'No'}, Slots: {len(suggested_times)}, Confirmation: {requires_confirmation}")
+        logger.info(f"✅ Response prepared at {ist_time.strftime('%H:%M:%S IST')} - Booking: {'Yes' if booking_data else 'No'}, Slots: {len(suggested_times)}, Confirmation: {requires_confirmation}")
         return response
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Unexpected error in chat endpoint: {e}")
+        ist_time = get_ist_time()
+        logger.error(f"❌ Unexpected error in chat endpoint at {ist_time.strftime('%H:%M:%S IST')}: {e}")
         logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
@@ -460,19 +466,20 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
 
 @app.get("/health")
 async def health_check():
-    """Enhanced health check endpoint"""
+    """Enhanced health check endpoint with IST time"""
     try:
+        ist_time = get_ist_time()
         agent_status = "healthy" if calendar_agent is not None else "unavailable"
-        
+
         # Check if using real or mock calendar service
         calendar_status = "mock"
         if calendar_agent and hasattr(calendar_agent, 'calendar_service'):
             if hasattr(calendar_agent.calendar_service, 'service') and calendar_agent.calendar_service.service:
                 if 'Mock' not in calendar_agent.calendar_service.service.__class__.__name__:
                     calendar_status = "authenticated"
-                    
+
         conversation_count = len(conversations)
-        
+
         return {
             "status": "healthy",
             "service": "AI Calendar Booking Agent",
@@ -481,7 +488,9 @@ async def health_check():
             "auth_required": calendar_status == "mock",
             "auth_url": "/auth/login" if calendar_status == "mock" else None,
             "active_conversations": conversation_count,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": ist_time.isoformat(),  # FIXED: IST timestamp
+            "timezone": "Asia/Kolkata",
+            "server_time": ist_time.strftime('%Y-%m-%d %H:%M:%S IST'),
             "environment": os.getenv("ENVIRONMENT", "development"),
             "version": "1.0.0"
         }

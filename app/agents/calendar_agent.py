@@ -1,3 +1,9 @@
+import pytz
+def get_ist_time() -> datetime:
+    """Get current time in IST"""
+    ist_tz = pytz.timezone('Asia/Kolkata')
+    utc_now = datetime.utcnow()
+    return utc_now.replace(tzinfo=pytz.UTC).astimezone(ist_tz).replace(tzinfo=None)
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
@@ -940,7 +946,7 @@ class CalendarBookingAgent:
         return state
 
     async def _generate_response_node(self, state: Dict) -> Dict:
-        """Generate appropriate response"""
+        """Generate appropriate response with IST timestamps"""
         try:
             print("💬 Generating response...")
             
@@ -964,25 +970,28 @@ class CalendarBookingAgent:
 
             response = await self.ai_service.generate_response(conversation_history, context)
 
+            # FIXED: Use IST timestamp
+            ist_time = get_ist_time()
             response_message = {
                 "role": "assistant",
                 "content": response,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": ist_time.isoformat()  # FIXED: IST timestamp
             }
 
             if "messages" not in state:
                 state["messages"] = []
             state["messages"].append(response_message)
 
-            print(f"✅ Generated response: {response[:50]}...")
+            print(f"✅ Generated response at {ist_time.strftime('%H:%M:%S IST')}: {response[:50]}...")
             return state
 
         except Exception as e:
             print(f"❌ Error generating response: {e}")
+            ist_time = get_ist_time()
             fallback_response = {
                 "role": "assistant",
                 "content": "I'm here to help you schedule meetings. What would you like to book?",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": ist_time.isoformat()  # FIXED: IST timestamp
             }
             
             if "messages" not in state:

@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from typing import Dict, List
 import os
+import pytz
 
 # Page configuration
 st.set_page_config(
@@ -51,13 +52,21 @@ def init_session_state():
     if "confirmation_pending" not in st.session_state:
         st.session_state.confirmation_pending = None
 
+def get_ist_time() -> datetime:
+    """Get current time in IST"""
+    ist_tz = pytz.timezone('Asia/Kolkata')
+    utc_now = datetime.utcnow()
+    return utc_now.replace(tzinfo=pytz.UTC).astimezone(ist_tz).replace(tzinfo=None)
+
 def send_message_to_backend(message: str) -> Dict:
     """Send message to FastAPI backend"""
     try:
+        # FIXED: Use IST timestamp
+        ist_time = get_ist_time()
         payload = {
             "role": "user",
             "content": message,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": ist_time.isoformat()  # FIXED: IST timestamp
         }
         
         response = requests.post(
@@ -151,11 +160,14 @@ def process_pending_time_selection():
         
         print(f"🔄 Processing time selection: {time_slot}")
         
+        # FIXED: Use IST timestamp
+        ist_time = get_ist_time()
+        
         # Add user selection to messages
         st.session_state.messages.append({
             "role": "user",
             "content": time_slot,
-            "timestamp": datetime.now(),
+            "timestamp": ist_time,  # FIXED: IST timestamp
             "is_time_selection": True
         })
         
@@ -166,7 +178,7 @@ def process_pending_time_selection():
         st.session_state.messages.append({
             "role": "assistant",
             "content": response["message"],
-            "timestamp": datetime.now(),
+            "timestamp": ist_time,  # FIXED: IST timestamp
             "booking_data": response.get("booking_data"),
             "suggested_times": response.get("suggested_times", []),
             "requires_confirmation": response.get("requires_confirmation", False)
@@ -218,10 +230,13 @@ def process_pending_confirmation():
         
         print(f"🔄 Processing confirmation: {user_message}")
         
+        # FIXED: Use IST timestamp
+        ist_time = get_ist_time()
+        
         st.session_state.messages.append({
             "role": "user",
             "content": user_message,
-            "timestamp": datetime.now(),
+            "timestamp": ist_time,  # FIXED: IST timestamp
             "is_confirmation": True
         })
         
@@ -229,7 +244,7 @@ def process_pending_confirmation():
         st.session_state.messages.append({
             "role": "assistant",
             "content": response["message"],
-            "timestamp": datetime.now(),
+            "timestamp": ist_time,  # FIXED: IST timestamp
             "booking_data": response.get("booking_data"),
             "suggested_times": response.get("suggested_times", []),
             "requires_confirmation": response.get("requires_confirmation", False)
@@ -356,34 +371,6 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.header("⚙️ Settings")
-        
-        # Backend URL configuration
-        new_backend_url = st.text_input(
-            "Backend URL",
-            value=st.session_state.backend_url,
-            help="URL of the FastAPI backend"
-        )
-        
-        if new_backend_url != st.session_state.backend_url:
-            st.session_state.backend_url = new_backend_url
-        
-        # Health check
-        if st.button("🔍 Test Connection"):
-            try:
-                response = requests.get(f"{st.session_state.backend_url}/health", timeout=5)
-                if response.status_code == 200:
-                    st.success("✅ Backend connected!")
-                    health_data = response.json()
-                    with st.expander("Health Details"):
-                        st.json(health_data)
-                else:
-                    st.error("❌ Backend connection failed")
-            except Exception as e:
-                st.error(f"❌ Cannot reach backend: {str(e)}")
-        
-        st.divider()
-        
         # Quick actions
         st.header("⚡ Quick Actions")
         
@@ -483,7 +470,8 @@ def main():
                             ts = datetime.fromisoformat(message["timestamp"].replace('Z', '+00:00'))
                         else:
                             ts = message["timestamp"]
-                        st.caption(f"🕐 {ts.strftime('%I:%M %p')}")
+                        # FIXED: Show IST timezone
+                        st.caption(f"🕐 {ts.strftime('%I:%M %p')} IST")
                     except:
                         pass
                 
@@ -510,17 +498,20 @@ def main():
     
     # Chat input
     if prompt := st.chat_input("Type your message here... (e.g., 'Schedule a meeting tomorrow at 3 PM')"):
+        # FIXED: Use IST timestamp
+        ist_time = get_ist_time()
+        
         # Add user message to chat
         st.session_state.messages.append({
             "role": "user",
             "content": prompt,
-            "timestamp": datetime.now()
+            "timestamp": ist_time  # FIXED: IST timestamp
         })
         
         # Display user message immediately
         with st.chat_message("user"):
             st.markdown(prompt)
-            st.caption(f"🕐 {datetime.now().strftime('%I:%M %p')}")
+            st.caption(f"🕐 {ist_time.strftime('%I:%M %p')} IST")  # FIXED: Show IST
         
         # Get response from backend
         with st.chat_message("assistant"):
@@ -557,42 +548,14 @@ def main():
         st.session_state.messages.append({
             "role": "assistant",
             "content": response["message"],
-            "timestamp": datetime.now(),
+            "timestamp": ist_time,  # FIXED: IST timestamp
             "booking_data": response.get("booking_data"),
             "suggested_times": response.get("suggested_times", []),
             "requires_confirmation": response.get("requires_confirmation", False)
         })
     
     # Footer with helpful information
-    with st.expander("💡 Tips & Examples", expanded=False):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            **📅 Booking Examples:**
-            - "Schedule a meeting tomorrow at 3 PM"
-            - "Book a 30-minute call with john@example.com"
-            - "I need a 2-hour workshop next Friday"
-            - "Set up a quick sync for today"
-            """)
-        
-        with col2:
-            st.markdown("""
-            **🔍 Availability Examples:**
-            - "What's my availability today?"
-            - "Check my calendar for tomorrow"
-            - "Do you have any free time this week?"
-            - "Show me available slots for Friday"
-            """)
-        
-        st.markdown("""
-        **💡 Pro Tips:**
-        - Be specific about duration (30 minutes, 1 hour, etc.)
-        - Mention date preferences (today, tomorrow, next week)
-        - Include attendee emails when needed
-        - Use natural language - I understand context!
-        - **Generic Times**: Say "afternoon" (2 PM), "morning" (10 AM), "evening" (6 PM)
-        """)
+    # (Tips & Examples section removed)
 
 if __name__ == "__main__":
     main()

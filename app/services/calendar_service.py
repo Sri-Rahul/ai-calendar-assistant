@@ -259,7 +259,7 @@ class GoogleCalendarService:
         end_time: datetime,
         calendar_id: str = 'primary'
     ) -> List[Dict]:
-        """FIXED: Consistent availability with proper caching"""
+        """FIXED: IST-aware availability with proper timezone handling"""
         if not self.service:
             self.authenticate()
 
@@ -276,13 +276,17 @@ class GoogleCalendarService:
                     return cached_data
 
             print(f"🔍 Checking availability from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}")
-            
+
+            # FIXED: Use IST timezone for all time calculations
+            ist_tz = pytz.timezone('Asia/Kolkata')
+            utc_tz = pytz.UTC
+
             # Expand date range to cover the full day
             extended_start = start_time.replace(hour=0, minute=0, second=0, microsecond=0)
             extended_end = end_time.replace(hour=23, minute=59, second=59, microsecond=999999)
-            
+
             print(f"🔍 Extended range: {extended_start.strftime('%Y-%m-%d %H:%M')} to {extended_end.strftime('%Y-%m-%d %H:%M')}")
-            
+
             # Get busy times from Google Calendar
             freebusy_query = {
                 'timeMin': extended_start.isoformat() + 'Z',
@@ -292,72 +296,76 @@ class GoogleCalendarService:
 
             response = self.service.freebusy().query(body=freebusy_query).execute()
             busy_times = response['calendars'][calendar_id]['busy']
-            
+
             print(f"📊 Found {len(busy_times)} busy periods")
             for busy in busy_times:
                 print(f"🚫 Busy: {busy['start']} to {busy['end']}")
 
             # Parse busy times to IST for comparison
             parsed_busy_times = []
-            ist_tz = pytz.timezone('Asia/Kolkata')
-            
             for busy in busy_times:
                 try:
                     busy_start_utc = datetime.fromisoformat(busy['start'].replace('Z', '+00:00'))
                     busy_end_utc = datetime.fromisoformat(busy['end'].replace('Z', '+00:00'))
-                    
                     busy_start_ist = busy_start_utc.astimezone(ist_tz).replace(tzinfo=None)
                     busy_end_ist = busy_end_utc.astimezone(ist_tz).replace(tzinfo=None)
-                    
+
                     parsed_busy_times.append({
                         'start': busy_start_ist,
                         'end': busy_end_ist,
                         'start_str': busy['start'],
                         'end_str': busy['end']
                     })
-                    
                     print(f"🚫 Parsed busy time: {busy_start_ist.strftime('%Y-%m-%d %H:%M')} to {busy_end_ist.strftime('%Y-%m-%d %H:%M')} IST")
-                    
                 except Exception as e:
                     print(f"⚠️ Error parsing busy time: {e}")
                     continue
 
-            # FIXED: Generate time slots without work time restrictions
+            # FIXED: Generate time slots using IST current time
             free_slots = []
-            now = datetime.now()
-            
-            # Start from the beginning of the target day or current time + 30 mins, whichever is later
-            if start_time.date() == now.date():
-                # If it's today, start from current time + 30 minutes
-                current_time = now + timedelta(minutes=30)
+
+            # FIXED: Get current time in IST
+            now_utc = datetime.utcnow()
+            now_ist = now_utc.replace(tzinfo=utc_tz).astimezone(ist_tz).replace(tzinfo=None)
+            print(f"🕐 Current IST time: {now_ist.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # Start from the beginning of the target day or current IST time + 30 mins, whichever is later
+            if start_time.date() == now_ist.date():
+                # If it's today, start from current IST time + 30 minutes
+                current_time = now_ist + timedelta(minutes=30)
                 # Round to next 15-minute interval
                 minutes = 15 * ((current_time.minute // 15) + 1)
                 if minutes >= 60:
                     current_time = current_time.replace(hour=current_time.hour + 1, minute=0, second=0, microsecond=0)
                 else:
                     current_time = current_time.replace(minute=minutes, second=0, microsecond=0)
+                print(f"🕐 Starting from current IST time + 30 mins: {current_time.strftime('%Y-%m-%d %H:%M')}")
             else:
                 # For future dates, start from 6 AM
                 current_time = start_time.replace(hour=6, minute=0, second=0, microsecond=0)
-
-            print(f"🕐 Starting time slot generation from: {current_time.strftime('%Y-%m-%d %H:%M')}")
+                print(f"🕐 Starting from 6 AM for future date: {current_time.strftime('%Y-%m-%d %H:%M')}")
 
             # Generate 30-minute slots throughout the day (6 AM to 11:30 PM)
             while current_time.date() == start_time.date() and current_time.hour < 24:
-                # FIXED: Only skip very early morning hours (before 6 AM) and very late night (after 11:30 PM)
+                # Only skip very early morning hours (before 6 AM) and very late night (after 11:30 PM)
                 if current_time.hour < 6 or current_time.hour >= 23.5:
                     current_time += timedelta(minutes=30)
                     continue
 
                 slot_start = current_time
                 slot_end = current_time + timedelta(hours=1)  # Check for 1-hour duration
-                
-                # FIXED: Stricter conflict checking
+
+                # FIXED: Additional check - don't show slots that are in the past (IST)
+                if slot_start <= now_ist:
+                    current_time += timedelta(minutes=30)
+                    continue
+
+                # Stricter conflict checking
                 is_free = True
                 for busy_time in parsed_busy_times:
                     busy_start = busy_time['start']
                     busy_end = busy_time['end']
-                    
+
                     # More precise overlap detection
                     if self._times_overlap_strict(slot_start, slot_end, busy_start, busy_end):
                         is_free = False
@@ -368,19 +376,19 @@ class GoogleCalendarService:
                     free_slots.append({
                         'start': slot_start.isoformat(),
                         'display': slot_start.strftime('%I:%M %p'),
-                        'full_display': f"{slot_start.strftime('%A, %B %d, %Y')}: {slot_start.strftime('%I:%M %p')}"
+                        'full_display': f"{slot_start.strftime('%A, %B %d, %Y')}: {slot_start.strftime('%I:%M %p')} IST"
                     })
-                    print(f"✅ Available slot: {slot_start.strftime('%A, %B %d at %I:%M %p')}")
+                    print(f"✅ Available slot: {slot_start.strftime('%A, %B %d at %I:%M %p')} IST")
 
                 current_time += timedelta(minutes=30)  # 30-minute intervals
 
             # Limit to 15 suggestions for better UX
             free_slots = free_slots[:15]
-            
+
             # Cache the results
             self._availability_cache[cache_key] = (free_slots, time.time())
-            
-            print(f"✅ Generated {len(free_slots)} available time slots")
+
+            print(f"✅ Generated {len(free_slots)} available time slots (IST filtered)")
             return free_slots
 
         except Exception as e:
