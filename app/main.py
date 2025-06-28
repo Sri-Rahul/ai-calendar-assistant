@@ -1,16 +1,19 @@
 import logging
 import traceback
-from fastapi import FastAPI, HTTPException, Query
-
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+import tempfile
+import json
 import os
+import pickle
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, HTMLResponse
+from google_auth_oauthlib.flow import Flow
+from typing import List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
 
 from .models.schemas import ChatMessage, ChatResponse, ConversationState, MessageRole
 from .agents.calendar_agent import CalendarBookingAgent
-
 
 # Load environment variables
 load_dotenv()
@@ -22,14 +25,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 app = FastAPI(
     title="AI Calendar Booking Agent",
     description="Conversational AI for Google Calendar appointment booking",
     version="1.0.0"
 )
 
-# FIXED: CORS configuration for production
+# CORS configuration for production
 allowed_origins = [
     "http://localhost:3000",
     "http://localhost:8501",
@@ -37,13 +39,12 @@ allowed_origins = [
     "https://*.onrender.com",
 ]
 
-# Add environment-specific origins
 if os.getenv("FRONTEND_URL"):
     allowed_origins.append(os.getenv("FRONTEND_URL"))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development - restrict in production
+    allow_origins=["*"],  # Configure appropriately for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,8 +57,7 @@ async def global_exception_handler(request, exc):
     logger.error(f"Traceback: {traceback.format_exc()}")
     return {"error": "Internal server error", "detail": str(exc)}
 
-
-# Initialize agent with error handling
+# Initialize agent
 try:
     calendar_agent = CalendarBookingAgent()
     logger.info("✅ CalendarBookingAgent initialized successfully")
@@ -68,19 +68,156 @@ except Exception as e:
 # In-memory conversation storage
 conversations = {}
 
-# Root endpoint
 @app.get("/")
 async def root():
-    """Root endpoint"""
+    """Root endpoint with setup instructions"""
     return {
         "message": "AI Calendar Booking Agent API",
         "status": "running",
+        "setup_required": not (calendar_agent and hasattr(calendar_agent.calendar_service, 'is_authenticated') and calendar_agent.calendar_service.is_authenticated),
+        "auth_url": "/auth/login",
         "docs": "/docs"
     }
 
+@app.get("/auth/login")
+async def auth_login():
+    """Start OAuth flow for production"""
+    try:
+        logger.info("🔐 Starting OAuth flow...")
+        
+        # Create credentials from environment variables
+        creds_dict = {
+            "web": {
+                "client_id": os.getenv('GOOGLE_CLIENT_ID'),
+                "client_secret": os.getenv('GOOGLE_CLIENT_SECRET'),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [f"https://ai-calendar-assistant-grdx.onrender.com/auth/callback"]
+            }
+        }
+        
+        # Create temporary credentials file
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+            json.dump(creds_dict, f)
+            temp_creds_file = f.name
+        
+        flow = Flow.from_client_secrets_file(
+            temp_creds_file,
+            scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
+        )
+        flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
+        
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            prompt='consent'
+        )
+        
+        # Clean up temp file
+        os.unlink(temp_creds_file)
+        
+        logger.info(f"🔗 Redirecting to: {authorization_url}")
+        return RedirectResponse(url=authorization_url)
+        
+    except Exception as e:
+        logger.error(f"❌ OAuth start failed: {e}")
+        return {"error": str(e)}
+
+@app.get("/auth/callback")
+async def auth_callback(code: str = None, state: str = None, error: str = None):
+    """Handle OAuth callback"""
+    try:
+        if error:
+            logger.error(f"❌ OAuth error: {error}")
+            return HTMLResponse(f"<h1>❌ Authorization failed: {error}</h1>")
+            
+        if not code:
+            logger.error("❌ No authorization code received")
+            return HTMLResponse("<h1>❌ Authorization failed - no code received</h1>")
+        
+        logger.info("🔐 Processing OAuth callback...")
+        
+        # Recreate the flow
+        creds_dict = {
+            "web": {
+                "client_id": os.getenv('GOOGLE_CLIENT_ID'),
+                "client_secret": os.getenv('GOOGLE_CLIENT_SECRET'),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["https://ai-calendar-assistant-grdx.onrender.com/auth/callback"]
+            }
+        }
+        
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+            json.dump(creds_dict, f)
+            temp_creds_file = f.name
+        
+        flow = Flow.from_client_secrets_file(
+            temp_creds_file,
+            scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
+        )
+        flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
+        
+        # Exchange code for token
+        flow.fetch_token(code=code)
+        logger.info("✅ Token exchange successful")
+        
+        # Save credentials
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(flow.credentials, token)
+        logger.info("💾 Credentials saved")
+        
+        # Reinitialize calendar agent with new credentials
+        global calendar_agent
+        calendar_agent = CalendarBookingAgent()
+        logger.info("🔄 Calendar agent reinitialized")
+        
+        # Clean up temp file
+        os.unlink(temp_creds_file)
+        
+        return HTMLResponse("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Calendar Connected</title>
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                .success { color: #28a745; }
+                .container { max-width: 500px; margin: 0 auto; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1 class="success">✅ Calendar Connected Successfully!</h1>
+                <p>Your Google Calendar has been connected to the AI Assistant.</p>
+                <p>You can now close this window and return to your AI Calendar Assistant.</p>
+                <button onclick="window.close()">Close Window</button>
+            </div>
+            <script>
+                setTimeout(() => window.close(), 3000);
+            </script>
+        </body>
+        </html>
+        """)
+        
+    except Exception as e:
+        logger.error(f"❌ OAuth callback failed: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return HTMLResponse(f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>Authorization Failed</title></head>
+        <body>
+            <h1>❌ Authorization failed</h1>
+            <p>Error: {str(e)}</p>
+            <p><a href="/auth/login">Try Again</a></p>
+        </body>
+        </html>
+        """)
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="default")):
-    """ENHANCED: Chat endpoint with proper conflict handling and alternatives display"""
+    """Chat endpoint with authentication check"""
     try:
         logger.info(f"📨 Received message: {message.content[:100]}... for session: {session_id}")
         
@@ -90,6 +227,16 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
                 status_code=503,
                 detail="Calendar agent service unavailable. Please check server logs."
             )
+
+        # Check if calendar is authenticated
+        if hasattr(calendar_agent.calendar_service, 'service') and hasattr(calendar_agent.calendar_service.service, '__class__'):
+            if 'Mock' in calendar_agent.calendar_service.service.__class__.__name__:
+                return ChatResponse(
+                    message="🔐 **Calendar Setup Required**\n\nPlease connect your Google Calendar first by clicking: [Connect Calendar](https://ai-calendar-assistant-grdx.onrender.com/auth/login)\n\nAfter connecting, you can start booking meetings!",
+                    booking_data=None,
+                    suggested_times=[],
+                    requires_confirmation=False
+                )
 
         # Get or create conversation state
         if session_id not in conversations:
@@ -154,7 +301,7 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             latest_response = "I'm here to help you schedule meetings. What would you like to book?"
             logger.info("📤 Using default response")
 
-        # FIXED: Enhanced response data extraction for conflicts and alternatives
+        # Enhanced response data extraction
         booking_data = None
         suggested_times = []
         requires_confirmation = False
@@ -171,7 +318,7 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
                 booking_data = updated_conversation.current_booking
                 logger.info(f"📅 CONFIRMED Booking: {booking_data.get('id')}")
 
-            # FIXED: Show suggested times for ALL showing slots stages including alternatives
+            # Show suggested times for availability stages
             elif (hasattr(updated_conversation, 'calendar_availability') and
                   updated_conversation.calendar_availability and
                   hasattr(updated_conversation, 'conversation_stage') and
@@ -218,19 +365,28 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             }
         )
 
-
-# Add health check with more details
 @app.get("/health")
 async def health_check():
     """Enhanced health check endpoint"""
     try:
         agent_status = "healthy" if calendar_agent is not None else "unavailable"
+        
+        # Check if using real or mock calendar service
+        calendar_status = "mock"
+        if calendar_agent and hasattr(calendar_agent, 'calendar_service'):
+            if hasattr(calendar_agent.calendar_service, 'service') and calendar_agent.calendar_service.service:
+                if 'Mock' not in calendar_agent.calendar_service.service.__class__.__name__:
+                    calendar_status = "authenticated"
+                    
         conversation_count = len(conversations)
         
         return {
             "status": "healthy",
             "service": "AI Calendar Booking Agent",
             "agent_status": agent_status,
+            "calendar_status": calendar_status,
+            "auth_required": calendar_status == "mock",
+            "auth_url": "/auth/login" if calendar_status == "mock" else None,
             "active_conversations": conversation_count,
             "timestamp": datetime.now().isoformat(),
             "environment": os.getenv("ENVIRONMENT", "development"),
@@ -239,6 +395,8 @@ async def health_check():
     except Exception as e:
         logger.error(f"❌ Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
+
+# ... rest of your existing endpoints remain the same ...
 
 @app.get("/conversation/{session_id}")
 async def get_conversation(session_id: str):
