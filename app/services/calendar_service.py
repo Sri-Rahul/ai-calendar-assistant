@@ -28,12 +28,28 @@ class GoogleCalendarService:
         
 
 
+
     def authenticate(self, credentials_file: str = "credentials.json", use_web_flow: bool = False):
-        """FIXED: Enhanced authentication with proper token checking"""
+        """Enhanced authentication with persistent token storage"""
         creds = None
 
-        # FIRST: Check if token.pickle exists (from web OAuth)
-        if os.path.exists('token.pickle'):
+        # FIRST: Try to load from environment variable
+        token_data = os.getenv('GOOGLE_TOKEN_DATA')
+        if token_data:
+            try:
+                import base64
+                import json
+                # Decode from base64 environment variable
+                token_bytes = base64.b64decode(token_data)
+                token_info = json.loads(token_bytes.decode('utf-8'))
+                creds = Credentials.from_authorized_user_info(token_info)
+                print("🔐 Loaded credentials from environment variable")
+            except Exception as e:
+                print(f"⚠️ Error loading credentials from environment: {e}")
+                creds = None
+
+        # SECOND: Check token.pickle (temporary storage)
+        if not creds and os.path.exists('token.pickle'):
             print("🔍 Found existing token.pickle file")
             with open('token.pickle', 'rb') as token:
                 try:
@@ -43,7 +59,7 @@ class GoogleCalendarService:
                     print(f"⚠️ Error loading saved credentials: {e}")
                     creds = None
 
-        # SECOND: Check if credentials are valid
+        # THIRD: Check if credentials are valid
         if creds and creds.valid:
             print("✅ Existing credentials are valid!")
             self.credentials = creds
@@ -51,12 +67,29 @@ class GoogleCalendarService:
                 self.service = build('calendar', 'v3', credentials=creds)
                 self.is_authenticated = True
                 print("🎉 Successfully connected to Google Calendar with existing token!")
-                
                 # Test the connection
                 calendar = self.service.calendars().get(calendarId='primary').execute()
                 print(f"📅 Connected to calendar: {calendar.get('summary', 'Primary Calendar')}")
+                # SAVE to environment when successful
+                try:
+                    token_info = {
+                        'token': creds.token,
+                        'refresh_token': creds.refresh_token,
+                        'token_uri': creds.token_uri,
+                        'client_id': creds.client_id,
+                        'client_secret': creds.client_secret,
+                        'scopes': creds.scopes
+                    }
+                    import base64
+                    import json
+                    token_json = json.dumps(token_info)
+                    token_b64 = base64.b64encode(token_json.encode('utf-8')).decode('utf-8')
+                    print("💾 Token ready for environment storage")
+                    print(f"📋 Add this to Render environment variables:")
+                    print(f"GOOGLE_TOKEN_DATA={token_b64}")
+                except Exception as e:
+                    print(f"⚠️ Error preparing token for environment storage: {e}")
                 return  # SUCCESS - exit early
-                
             except Exception as e:
                 print(f"❌ Error building calendar service with existing token: {e}")
                 creds = None

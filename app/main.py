@@ -199,6 +199,25 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
             pickle.dump(flow.credentials, token)
         logger.info("💾 Credentials saved")
 
+        # Generate persistent token for environment storage
+        if flow.credentials:
+            try:
+                token_info = {
+                    'token': flow.credentials.token,
+                    'refresh_token': flow.credentials.refresh_token,
+                    'token_uri': flow.credentials.token_uri,
+                    'client_id': flow.credentials.client_id,
+                    'client_secret': flow.credentials.client_secret,
+                    'scopes': flow.credentials.scopes
+                }
+                import base64
+                token_json = json.dumps(token_info)
+                token_b64 = base64.b64encode(token_json.encode('utf-8')).decode('utf-8')
+                logger.info("💾 Persistent token generated")
+                logger.info(f"📋 GOOGLE_TOKEN_DATA={token_b64}")
+            except Exception as e:
+                logger.error(f"⚠️ Error generating persistent token: {e}")
+
         # FIXED: Properly reinitialize calendar agent
         global calendar_agent
         try:
