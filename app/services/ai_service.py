@@ -409,10 +409,75 @@ Return only valid JSON with intent and entities. Be precise and concise.
         return result
 
     async def generate_response(self, conversation_history: List[Dict], context: Optional[Dict] = None) -> str:
-        """ENHANCED: Generate response with better handling for all stages"""
+        """ENHANCED: Use OpenRouter more actively"""
         if not context:
             return "Hi! I'm your AI calendar assistant. What meeting would you like to schedule?"
 
+        stage = context.get("stage", "")
+        entities = context.get("entities", {})
+
+        # FIXED: Use OpenRouter for dynamic responses instead of templates
+        if stage in ["asking_title", "asking_duration", "asking_attendees", "awaiting_confirmation"]:
+            # Try OpenRouter first for these stages
+            if self.use_openrouter and self.openrouter_available and self._check_rate_limit():
+                try:
+                    self._increment_request_count()
+                    dynamic_response = await self._try_openrouter_response_for_stage(conversation_history, context, stage)
+                    if dynamic_response:
+                        print(f"🤖 OpenRouter response for {stage}: {dynamic_response[:50]}...")
+                        return dynamic_response
+                except Exception as e:
+                    print(f"❌ OpenRouter failed for {stage}: {e}")
+
+        # Fallback to templates for critical stages
+        return self._generate_template_response(context)
+
+    async def _try_openrouter_response_for_stage(self, conversation_history: List[Dict], context: Dict, stage: str) -> str:
+        """Generate stage-specific response using OpenRouter"""
+        import requests
+        
+        entities = context.get("entities", {})
+        
+        # Create stage-specific prompts
+        stage_prompts = {
+            "asking_title": "The user wants to book a meeting but hasn't specified the purpose. Ask them what the meeting is about in a friendly, professional way.",
+            "asking_duration": f"The user wants to book a meeting about '{entities.get('title', 'their topic')}'. Ask them how long the meeting should be. Suggest common durations like 30 minutes, 1 hour, etc.",
+            "asking_attendees": f"The user wants to book a '{entities.get('title', 'meeting')}' meeting. Ask who should be invited. Mention they can provide email addresses or say 'no' if it's just them.",
+            "awaiting_confirmation": "Confirm the meeting details with the user before booking. Present the details clearly and ask for confirmation."
+        }
+        
+        prompt = stage_prompts.get(stage, "Help the user with their calendar booking request.")
+        
+        messages = [
+            {"role": "system", "content": "You are a helpful AI calendar assistant. Be concise, professional, and friendly. Your responses should be 1-2 sentences maximum."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.openrouter_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "google/gemini-flash-1.5",
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "max_tokens": 100
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                content = response.json()["choices"][0]["message"]["content"]
+                return content.strip()
+        except Exception as e:
+            print(f"❌ OpenRouter API call failed: {e}")
+            return None
+
+    def _generate_template_response(self, context: Dict) -> str:
+        """Fallback template responses"""
         stage = context.get("stage", "")
         entities = context.get("entities", {})
         availability = context.get("availability", [])
@@ -424,43 +489,34 @@ Return only valid JSON with intent and entities. Be precise and concise.
         if error_message:
             return f"I encountered an issue: {error_message}. Let's try again."
 
-        # ENHANCED: Handle conflicts with alternative suggestions
+        # Handle conflicts with alternative suggestions
         if conflict_message:
             if availability and len(availability) > 0:
                 return f"{conflict_message}. Here are some alternative times available for your '{entities.get('title', 'meeting')}':"
             else:
                 return f"{conflict_message}. Unfortunately, there are no other available slots for that day. Would you like to try a different date?"
 
-        # Handle different stages
         if stage == "asking_title":
             return "What's the purpose or topic of your meeting?"
-
         elif stage == "asking_duration":
             title = entities.get("title", "meeting")
             return f"How long should your '{title}' be? (e.g., 30 minutes, 1 hour, 2 hours)"
-
         elif stage == "asking_specific_day":
             title = entities.get("title", "meeting")
             duration = entities.get("duration", "meeting")
             return f"Which day next week would you like to schedule your '{title}' ({duration})? (e.g., Monday, Tuesday, Wednesday, Thursday, Friday)"
-
         elif stage in ["showing_slots", "showing_alternative_slots"]:
             title = entities.get("title", "meeting")
             duration = entities.get("duration", "1 hour")
-            
-            # Get formatted date
             parsed_date = entities.get("parsed_date")
             if parsed_date:
                 date_display = parsed_date.strftime('%A, %B %d')
             else:
                 date_display = entities.get("date", "the selected day")
-            
             if availability and len(availability) > 0:
                 if stage == "showing_alternative_slots":
-                    # FIXED: Handle generic time failures
                     default_time_failed = context.get("default_time_failed")
                     generic_time_failed = context.get("generic_time_failed")
-                    
                     if default_time_failed and generic_time_failed:
                         return f"The {generic_time_failed} slot ({default_time_failed}) is already taken. Here are other available {duration} slots for your '{title}' on {date_display}:"
                     else:
@@ -469,7 +525,6 @@ Return only valid JSON with intent and entities. Be precise and concise.
                     return f"Here are available {duration} slots for your '{title}' on {date_display}. Please select a time:"
             else:
                 return f"I'm checking availability for your '{title}' on {date_display}..."
-
         elif stage == "no_availability":
             title = entities.get("title", "meeting")
             parsed_date = entities.get("parsed_date")
@@ -478,26 +533,20 @@ Return only valid JSON with intent and entities. Be precise and concise.
             else:
                 date_display = entities.get("date", "that day")
             return f"I couldn't find any available slots for your '{title}' on {date_display}. Would you like to try a different date?"
-
         elif stage == "no_alternatives":
             return "I couldn't find any alternative time slots for that day. Would you like to try a different date?"
-
         elif stage == "asking_attendees":
             title = entities.get("title", "meeting")
             selected_time = entities.get("selected_time", "")
-            
-            # Get formatted date
             parsed_date = entities.get("parsed_date")
             if parsed_date:
                 date_display = parsed_date.strftime('%A, %B %d')
             else:
                 date_display = entities.get("date", "the selected day")
-                
             if selected_time:
                 return f"Great! I'll schedule your '{title}' for {selected_time} on {date_display}. Who should I invite? (Enter email addresses, or say 'no' if it's just you)"
             else:
                 return f"Who should I invite to your '{title}' meeting? (Enter email addresses, or say 'no' if it's just you)"
-
         elif stage == "awaiting_confirmation":
             summary = context.get("booking_summary", {})
             title = summary.get("title", "Meeting")
@@ -505,37 +554,16 @@ Return only valid JSON with intent and entities. Be precise and concise.
             time = summary.get("time", "")
             duration = summary.get("duration", "")
             attendees = summary.get("attendees", [])
-            
             attendees_text = ", ".join(attendees) if attendees else "Just you"
             return f"Please confirm your booking:\n\n**{title}**\nDate: {date}\nTime: {time}\nDuration: {duration}\nAttendees: {attendees_text}\n\nShould I book this meeting?"
-
         elif stage == "booking_confirmed":
             if booking and booking.get('id'):
                 return "✅ **Meeting Successfully Booked!**\n\nYour meeting has been added to your calendar. Invitations have been sent to all attendees."
             else:
                 return "✅ Your meeting has been scheduled successfully!"
-
         elif stage == "booking_failed":
             return "❌ I couldn't complete the booking. Let's try again. What meeting would you like to schedule?"
-
-        # Check rate limits for AI generation
-        if not self._check_rate_limit():
-            return self._generate_fallback_response(context)
-
-        # Try AI generation
-        if self.use_openrouter and self.openrouter_available:
-            try:
-                self._increment_request_count()
-                return await self._try_openrouter_response(conversation_history, context)
-            except Exception as e:
-                print(f"❌ OpenRouter response error: {e}")
-        elif self.use_gemini and self.genai_available:
-            try:
-                self._increment_request_count()
-                return await self._try_gemini_response(conversation_history, context)
-            except Exception as e:
-                print(f"❌ Gemini response error: {e}")
-
+        # Fallback for other stages
         return self._generate_fallback_response(context)
 
     async def _try_openrouter_response(self, conversation_history: List[Dict], context: Dict) -> str:
