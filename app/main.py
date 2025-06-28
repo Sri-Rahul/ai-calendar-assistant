@@ -31,20 +31,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration for production
-allowed_origins = [
-    "http://localhost:3000",
-    "http://localhost:8501",
-    "https://*.streamlit.app",
-    "https://*.onrender.com",
-]
-
-if os.getenv("FRONTEND_URL"):
-    allowed_origins.append(os.getenv("FRONTEND_URL"))
-
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -71,13 +61,28 @@ conversations = {}
 @app.get("/")
 async def root():
     """Root endpoint with setup instructions"""
-    return {
-        "message": "AI Calendar Booking Agent API",
-        "status": "running",
-        "setup_required": not (calendar_agent and hasattr(calendar_agent.calendar_service, 'is_authenticated') and calendar_agent.calendar_service.is_authenticated),
-        "auth_url": "/auth/login",
-        "docs": "/docs"
-    }
+    try:
+        auth_required = True
+        if calendar_agent and hasattr(calendar_agent, 'calendar_service'):
+            if hasattr(calendar_agent.calendar_service, 'service'):
+                if 'Mock' not in calendar_agent.calendar_service.service.__class__.__name__:
+                    auth_required = False
+        
+        return {
+            "message": "AI Calendar Booking Agent API",
+            "status": "running",
+            "setup_required": auth_required,
+            "auth_url": "/auth/login" if auth_required else None,
+            "docs": "/docs"
+        }
+    except Exception as e:
+        return {
+            "message": "AI Calendar Booking Agent API",
+            "status": "running",
+            "setup_required": True,
+            "auth_url": "/auth/login",
+            "docs": "/docs"
+        }
 
 @app.get("/auth/login")
 async def auth_login():
@@ -92,36 +97,55 @@ async def auth_login():
                 "client_secret": os.getenv('GOOGLE_CLIENT_SECRET'),
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [f"https://ai-calendar-assistant-grdx.onrender.com/auth/callback"]
+                "redirect_uris": ["https://ai-calendar-assistant-grdx.onrender.com/auth/callback"]
             }
         }
+        
+        # Validate environment variables
+        if not creds_dict["web"]["client_id"] or not creds_dict["web"]["client_secret"]:
+            logger.error("❌ Missing Google OAuth credentials in environment variables")
+            return HTMLResponse("""
+            <h1>❌ Configuration Error</h1>
+            <p>Google OAuth credentials are not properly configured.</p>
+            <p>Please check the environment variables GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.</p>
+            """)
         
         # Create temporary credentials file
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
             json.dump(creds_dict, f)
             temp_creds_file = f.name
         
-        flow = Flow.from_client_secrets_file(
-            temp_creds_file,
-            scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
-        )
-        flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
-        
-        authorization_url, state = flow.authorization_url(
-            access_type='offline',
-            include_granted_scopes='true',
-            prompt='consent'
-        )
-        
-        # Clean up temp file
-        os.unlink(temp_creds_file)
-        
-        logger.info(f"🔗 Redirecting to: {authorization_url}")
-        return RedirectResponse(url=authorization_url)
+        try:
+            flow = Flow.from_client_secrets_file(
+                temp_creds_file,
+                scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
+            )
+            flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
+            
+            authorization_url, state = flow.authorization_url(
+                access_type='offline',
+                include_granted_scopes='true',
+                prompt='consent'
+            )
+            
+            logger.info(f"🔗 Redirecting to: {authorization_url}")
+            return RedirectResponse(url=authorization_url)
+            
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(temp_creds_file)
+            except:
+                pass
         
     except Exception as e:
         logger.error(f"❌ OAuth start failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return HTMLResponse(f"""
+        <h1>❌ OAuth Setup Failed</h1>
+        <p>Error: {str(e)}</p>
+        <p><a href="/">Return to Home</a></p>
+        """)
 
 @app.get("/auth/callback")
 async def auth_callback(code: str = None, state: str = None, error: str = None):
@@ -129,11 +153,19 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
     try:
         if error:
             logger.error(f"❌ OAuth error: {error}")
-            return HTMLResponse(f"<h1>❌ Authorization failed: {error}</h1>")
+            return HTMLResponse(f"""
+            <h1>❌ Authorization failed</h1>
+            <p>Error: {error}</p>
+            <p><a href="/auth/login">Try Again</a></p>
+            """)
             
         if not code:
             logger.error("❌ No authorization code received")
-            return HTMLResponse("<h1>❌ Authorization failed - no code received</h1>")
+            return HTMLResponse("""
+            <h1>❌ Authorization failed</h1>
+            <p>No authorization code received</p>
+            <p><a href="/auth/login">Try Again</a></p>
+            """)
         
         logger.info("🔐 Processing OAuth callback...")
         
@@ -152,53 +184,66 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
             json.dump(creds_dict, f)
             temp_creds_file = f.name
         
-        flow = Flow.from_client_secrets_file(
-            temp_creds_file,
-            scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
-        )
-        flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
-        
-        # Exchange code for token
-        flow.fetch_token(code=code)
-        logger.info("✅ Token exchange successful")
-        
-        # Save credentials
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(flow.credentials, token)
-        logger.info("💾 Credentials saved")
-        
-        # Reinitialize calendar agent with new credentials
-        global calendar_agent
-        calendar_agent = CalendarBookingAgent()
-        logger.info("🔄 Calendar agent reinitialized")
-        
-        # Clean up temp file
-        os.unlink(temp_creds_file)
-        
-        return HTMLResponse("""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Calendar Connected</title>
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-                .success { color: #28a745; }
-                .container { max-width: 500px; margin: 0 auto; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1 class="success">✅ Calendar Connected Successfully!</h1>
-                <p>Your Google Calendar has been connected to the AI Assistant.</p>
-                <p>You can now close this window and return to your AI Calendar Assistant.</p>
-                <button onclick="window.close()">Close Window</button>
-            </div>
-            <script>
-                setTimeout(() => window.close(), 3000);
-            </script>
-        </body>
-        </html>
-        """)
+        try:
+            flow = Flow.from_client_secrets_file(
+                temp_creds_file,
+                scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
+            )
+            flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
+            
+            # Exchange code for token
+            flow.fetch_token(code=code)
+            logger.info("✅ Token exchange successful")
+            
+            # Save credentials
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(flow.credentials, token)
+            logger.info("💾 Credentials saved")
+            
+            # Reinitialize calendar agent with new credentials
+            global calendar_agent
+            calendar_agent = CalendarBookingAgent()
+            logger.info("🔄 Calendar agent reinitialized")
+            
+            return HTMLResponse("""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Calendar Connected</title>
+                <style>
+                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
+                    .success { color: #28a745; font-size: 24px; }
+                    .container { max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                    .btn { background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1 class="success">✅ Calendar Connected Successfully!</h1>
+                    <p>Your Google Calendar has been connected to the AI Assistant.</p>
+                    <p>You can now:</p>
+                    <ul style="text-align: left; margin: 20px 0;">
+                        <li>✅ Book real meetings</li>
+                        <li>✅ Send email invitations</li>
+                        <li>✅ Check availability</li>
+                        <li>✅ Manage your calendar</li>
+                    </ul>
+                    <a href="/" class="btn">View API Status</a>
+                    <p style="margin-top: 20px; color: #666;">You can now use your frontend application!</p>
+                </div>
+                <script>
+                    setTimeout(() => window.close(), 5000);
+                </script>
+            </body>
+            </html>
+            """)
+            
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(temp_creds_file)
+            except:
+                pass
         
     except Exception as e:
         logger.error(f"❌ OAuth callback failed: {e}")
@@ -207,7 +252,7 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
         <!DOCTYPE html>
         <html>
         <head><title>Authorization Failed</title></head>
-        <body>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
             <h1>❌ Authorization failed</h1>
             <p>Error: {str(e)}</p>
             <p><a href="/auth/login">Try Again</a></p>
@@ -229,14 +274,21 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             )
 
         # Check if calendar is authenticated
-        if hasattr(calendar_agent.calendar_service, 'service') and hasattr(calendar_agent.calendar_service.service, '__class__'):
-            if 'Mock' in calendar_agent.calendar_service.service.__class__.__name__:
-                return ChatResponse(
-                    message="🔐 **Calendar Setup Required**\n\nPlease connect your Google Calendar first by clicking: [Connect Calendar](https://ai-calendar-assistant-grdx.onrender.com/auth/login)\n\nAfter connecting, you can start booking meetings!",
-                    booking_data=None,
-                    suggested_times=[],
-                    requires_confirmation=False
-                )
+        is_mock = False
+        try:
+            if hasattr(calendar_agent, 'calendar_service') and hasattr(calendar_agent.calendar_service, 'service'):
+                if calendar_agent.calendar_service.service and 'Mock' in calendar_agent.calendar_service.service.__class__.__name__:
+                    is_mock = True
+        except:
+            is_mock = True
+
+        if is_mock:
+            return ChatResponse(
+                message="🔐 **Calendar Setup Required**\n\nPlease connect your Google Calendar first by clicking: [Connect Calendar](https://ai-calendar-assistant-grdx.onrender.com/auth/login)\n\nAfter connecting, you can start booking real meetings!",
+                booking_data=None,
+                suggested_times=[],
+                requires_confirmation=False
+            )
 
         # Get or create conversation state
         if session_id not in conversations:
@@ -256,8 +308,6 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             conversation.current_booking = None
             conversation.conversation_stage = "initial"
             conversation.user_intent = None
-
-        logger.info(f"💬 Conversation has {len(conversation.messages)} existing messages")
 
         # Add user message with timestamp
         user_message = ChatMessage(
@@ -395,8 +445,6 @@ async def health_check():
     except Exception as e:
         logger.error(f"❌ Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
-
-# ... rest of your existing endpoints remain the same ...
 
 @app.get("/conversation/{session_id}")
 async def get_conversation(session_id: str):

@@ -13,8 +13,21 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
 # Configuration
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1.nip.io:8000")
+def get_backend_url():
+    """Get backend URL based on environment"""
+    # Check if running in Streamlit Cloud
+    if hasattr(st, 'secrets') and 'BACKEND_URL' in st.secrets:
+        return st.secrets['BACKEND_URL']
+    # Check environment variable
+    backend_url = os.getenv('BACKEND_URL')
+    if backend_url:
+        return backend_url
+    # Production backend URL
+    return "https://ai-calendar-assistant-grdx.onrender.com"
+
+BACKEND_URL = get_backend_url()
 SESSION_ID = "streamlit_session"
 
 def init_session_state():
