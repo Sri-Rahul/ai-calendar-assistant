@@ -212,12 +212,22 @@ Return only valid JSON with intent and entities. Be precise and concise.
         return self._rule_based_extraction(message)
 
     def _rule_based_extraction(self, message: str) -> Dict:
-        """Rule-based entity extraction as fallback"""
+        """ENHANCED: Rule-based entity extraction with aggressive title detection"""
         message_lower = message.lower().strip()
         entities = {}
 
-        # Extract title
+        # ENHANCED: Very aggressive title extraction for simple messages
         title = self._extract_title(message)
+        if not title:
+            # Last resort: if it's a reasonable short message, use it as title
+            words = message.strip().split()
+            if 1 <= len(words) <= 6 and len(message.strip()) >= 2:
+                # Avoid obvious system messages
+                avoid_phrases = ['error', 'failed', 'please', 'help', 'sorry']
+                if not any(phrase in message_lower for phrase in avoid_phrases):
+                    title = message.strip().title()
+                    print(f"🎯 Last resort title detection: '{title}'")
+        
         if title:
             entities["title"] = title
 
@@ -247,7 +257,7 @@ Return only valid JSON with intent and entities. Be precise and concise.
         return {"intent": intent, "entities": entities}
 
     def _extract_title(self, message: str) -> Optional[str]:
-        """FIXED: Extract meeting title from message with better simple title detection"""
+        """ENHANCED: Extract meeting title from message with aggressive simple title detection"""
         message_lower = message.lower().strip()
         
         # Handle explicit title statements first
@@ -265,7 +275,7 @@ Return only valid JSON with intent and entities. Be precise and concise.
                 if match:
                     title = match.group(1).strip().strip('"\'')
                     return title.title()
-        
+
         # Common patterns for titles in longer sentences
         patterns = [
             r'(?:meeting|call|session)\s+(?:about|regarding|on)\s+([^,\.]+)',
@@ -283,33 +293,34 @@ Return only valid JSON with intent and entities. Be precise and concise.
                 title = re.sub(r'\s+', ' ', title)  # Remove extra spaces
                 return title.title()
 
-        # FIXED: Better simple word/phrase detection
+        # ENHANCED: Very aggressive simple word/phrase detection
         words = message.strip().split()
         
-        # Skip obvious non-titles
-        skip_words = ['time', 'hour', 'minute', 'pm', 'am', 'today', 'tomorrow', 'yes', 'no', 'ok', 'okay']
+        # Skip obvious non-titles (reduced list)
+        skip_words = ['time', 'hour', 'minute', 'pm', 'am', 'yes', 'no', 'ok', 'okay']
         
-        # If it's 1-4 words and doesn't contain time-related words
-        if 1 <= len(words) <= 4:
+        # FIXED: Much more liberal acceptance for 1-8 words
+        if 1 <= len(words) <= 8:
             # Check if any word is in skip_words
             if not any(word.lower() in skip_words for word in words):
-                # Additional check: avoid sentences with question words
+                # Additional check: avoid sentences with question words (but allow "ai" etc)
                 question_words = ['what', 'when', 'where', 'how', 'why', 'who', 'which']
                 if not any(word.lower() in question_words for word in words):
-                    # FIXED: This should catch "casual call", "project review", etc.
+                    # ENHANCED: Accept almost anything reasonable
                     title = message.strip()
-                    print(f"🎯 Detected simple title: '{title}'")
-                    return title.title()
-        
+                    if len(title) >= 2:  # At least 2 characters
+                        print(f"🎯 Detected simple title: '{title}'")
+                        return title.title()
+
         # Handle quoted text as titles
         quoted_match = re.search(r'"([^"]+)"', message)
         if quoted_match:
             return quoted_match.group(1).title()
-        
-        # Single word titles (but avoid obvious non-titles)
-        if len(words) == 1 and words[0].lower() not in skip_words and len(words[0]) > 2:
+
+        # ENHANCED: Single word titles (very liberal)
+        if len(words) == 1 and len(words[0]) >= 2 and words[0].lower() not in skip_words:
             return words[0].title()
-        
+
         return None
 
     def _extract_duration(self, message: str) -> Optional[str]:

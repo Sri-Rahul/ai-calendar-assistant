@@ -1,3 +1,4 @@
+
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
@@ -9,6 +10,12 @@ import pytz
 from ..models.schemas import ConversationState, BookingRequest, ChatMessage, MessageRole
 from ..services.calendar_service import GoogleCalendarService
 from ..services.ai_service import AIService
+
+def get_ist_time() -> datetime:
+    """Get current time in IST"""
+    ist_tz = pytz.timezone('Asia/Kolkata')
+    utc_now = datetime.utcnow()
+    return utc_now.replace(tzinfo=pytz.UTC).astimezone(ist_tz).replace(tzinfo=None)
 
 def parse_duration(duration_str: str) -> timedelta:
     """Parse duration string to timedelta"""
@@ -188,7 +195,7 @@ class CalendarBookingAgent:
         return entities
 
     async def _extract_info_node(self, state: Dict) -> Dict:
-        """Extract and consolidate information from user message"""
+        """FIXED: Extract and consolidate information from user message"""
         try:
             messages = state.get("messages", [])
             if not messages:
@@ -202,8 +209,38 @@ class CalendarBookingAgent:
                 print("🔄 Detected new booking request, resetting conversation...")
                 state = self._reset_conversation_state(state)
 
-            # Get current entities
+            # Get current entities and stage
             entities = state.get("extracted_entities", {})
+            current_stage = state.get("conversation_stage", "")
+            
+            # FIXED: Enhanced title detection for asking_title stage
+            if current_stage == "asking_title" and not entities.get("title"):
+                # When specifically asking for title, be very liberal in acceptance
+                title_candidate = last_message.strip().strip('"\'')
+                
+                # Skip obvious non-titles
+                non_title_phrases = [
+                    "i don't know", "not sure", "whatever", "anything", "nothing specific",
+                    "just a meeting", "regular meeting", "normal meeting", "i need help",
+                    "what", "when", "where", "how", "why", "who", "which"
+                ]
+                
+                # Check if it's a reasonable title
+                is_valid_title = (
+                    title_candidate and
+                    len(title_candidate.split()) <= 8 and  # Allow up to 8 words
+                    len(title_candidate) >= 2 and  # At least 2 characters
+                    not any(phrase in title_candidate.lower() for phrase in non_title_phrases) and
+                    not title_candidate.lower().startswith(('what', 'when', 'where', 'how', 'why', 'who'))
+                )
+                
+                if is_valid_title:
+                    entities["title"] = title_candidate.title()
+                    print(f"🎯 FORCE-DETECTED title in asking_title stage: '{entities['title']}'")
+                    
+                    # Set the entities and continue
+                    state["extracted_entities"] = entities
+                    return state
 
             # Extract new information from the latest message
             analysis = await self.ai_service.extract_intent_and_entities(last_message)
@@ -289,28 +326,8 @@ class CalendarBookingAgent:
                             entities[key] = [str(value)] if str(value).strip() else []
                         print(f"👥 Updated attendees: {entities[key]}")
 
-
             # Handle generic time defaults
             entities = self._handle_generic_time_defaults(entities)
-
-            # FIXED: Enhanced title detection for simple responses
-            if not entities.get("title") and state.get("conversation_stage") == "asking_title":
-                # If we're specifically asking for title and don't have one yet
-                # Be more liberal in accepting the response as a title
-                last_message_clean = last_message.strip().strip('"\'')
-                # Avoid obvious non-titles
-                non_title_phrases = [
-                    "i don't know", 'not sure', 'whatever', 'anything', 'nothing specific',
-                    'just a meeting', 'regular meeting', 'normal meeting'
-                ]
-                if (
-                    last_message_clean and
-                    len(last_message_clean.split()) <= 6 and
-                    not any(phrase in last_message.lower() for phrase in non_title_phrases) and
-                    not any(word in last_message.lower() for word in ['when', 'what', 'how', 'where', 'time'])
-                ):
-                    entities["title"] = last_message_clean.title()
-                    print(f"🎯 Force-detected title from asking_title stage: '{entities['title']}'")
 
             # Handle "no attendees" responses
             if self._is_no_attendees_response(last_message):
