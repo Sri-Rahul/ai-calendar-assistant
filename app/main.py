@@ -366,6 +366,18 @@ async def chat_endpoint(message: ChatMessage, session_id: str = Query(default="d
             conversation.messages.append(fallback_message)
             updated_conversation = conversation
 
+
+        # FIXED: Handle cancellation by resetting conversation
+        if (hasattr(updated_conversation, 'conversation_stage') and 
+            updated_conversation.conversation_stage == "booking_cancelled"):
+            logger.info("❌ User cancelled booking, resetting conversation")
+            # Reset conversation for fresh start
+            updated_conversation.extracted_entities = {}
+            updated_conversation.calendar_availability = None
+            updated_conversation.current_booking = None
+            updated_conversation.conversation_stage = "initial"
+            updated_conversation.user_intent = None
+
         # Update stored conversation
         conversations[session_id] = updated_conversation
 

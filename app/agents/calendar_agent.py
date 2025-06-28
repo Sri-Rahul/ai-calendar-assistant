@@ -204,7 +204,7 @@ class CalendarBookingAgent:
 
             # Get current entities
             entities = state.get("extracted_entities", {})
-            
+
             # Extract new information from the latest message
             analysis = await self.ai_service.extract_intent_and_entities(last_message)
             new_entities = analysis.get("entities", {})
@@ -213,6 +213,18 @@ class CalendarBookingAgent:
             # Handle confirmation
             if intent == "confirm_booking" or self._is_confirmation(last_message):
                 state["user_intent"] = "confirm_booking"
+                return state
+
+            # FIXED: Handle cancellation/rejection
+            if intent == "reject" or self._is_cancellation(last_message):
+                print("❌ User cancelled booking")
+                state["user_intent"] = "cancel_booking"
+                state["conversation_stage"] = "booking_cancelled"
+                # Reset all entities for fresh start
+                state["extracted_entities"] = {}
+                state["calendar_availability"] = None
+                state["current_booking"] = None
+                state["booking_summary"] = None
                 return state
 
             # Handle time selection (when user selects from available slots)
@@ -317,6 +329,15 @@ class CalendarBookingAgent:
         except Exception as e:
             print(f"❌ Error in extract_info_node: {e}")
             return state
+
+    def _is_cancellation(self, message: str) -> bool:
+        """Check if message is a cancellation"""
+        message_lower = message.lower().strip()
+        cancellations = ['no', 'cancel', 'nevermind', 'no thanks', 'not now', 'abort', 'stop']
+        # Handle "no, cancel" specifically
+        if any(phrase in message_lower for phrase in ['no, cancel', 'no cancel', 'cancel it']):
+            return True
+        return message_lower in cancellations
 
     def _extract_time_range(self, message: str) -> Dict:
         """Extract time range like '3-5 PM' or 'between 3-5 PM'"""
@@ -500,11 +521,11 @@ class CalendarBookingAgent:
         return message_lower in no_attendees
 
     def _route_next_step(self, state: Dict) -> str:
-        """FIXED: Enhanced routing with proper conflict handling"""
+        """Enhanced routing with proper conflict and cancellation handling"""
         entities = state.get("extracted_entities", {})
         intent = state.get("user_intent", "")
         stage = state.get("conversation_stage", "")
-        
+
         # Handle confirmation
         if intent == "confirm_booking":
             if self._has_complete_booking_info(entities):
@@ -512,7 +533,11 @@ class CalendarBookingAgent:
             else:
                 return "generate_response"
 
-        # FIXED: Handle booking conflicts - show alternatives
+        # FIXED: Handle cancellation - reset everything
+        if intent == "cancel_booking" or stage == "booking_cancelled":
+            return "generate_response"
+
+        # Handle booking conflicts - show alternatives
         if stage == "booking_conflict":
             return "handle_conflict"
 
