@@ -29,11 +29,12 @@ class GoogleCalendarService:
 
 
 
+
     def authenticate(self, credentials_file: str = "credentials.json", use_web_flow: bool = False):
         """Enhanced authentication with persistent token storage"""
         creds = None
 
-        # FIRST: Try to load from environment variable
+        # FIRST: Try to load from environment variable (FIXED: This should work first)
         token_data = os.getenv('GOOGLE_TOKEN_DATA')
         if token_data:
             try:
@@ -44,6 +45,22 @@ class GoogleCalendarService:
                 token_info = json.loads(token_bytes.decode('utf-8'))
                 creds = Credentials.from_authorized_user_info(token_info)
                 print("🔐 Loaded credentials from environment variable")
+
+                # FIXED: Validate and use immediately if valid
+                if creds and creds.valid:
+                    print("✅ Environment credentials are valid!")
+                    self.credentials = creds
+                    try:
+                        self.service = build('calendar', 'v3', credentials=creds)
+                        self.is_authenticated = True
+                        print("🎉 Successfully connected to Google Calendar from environment!")
+                        # Test the connection
+                        calendar = self.service.calendars().get(calendarId='primary').execute()
+                        print(f"📅 Connected to calendar: {calendar.get('summary', 'Primary Calendar')}")
+                        return  # SUCCESS - exit early
+                    except Exception as e:
+                        print(f"❌ Error building calendar service from environment: {e}")
+                        creds = None
             except Exception as e:
                 print(f"⚠️ Error loading credentials from environment: {e}")
                 creds = None
@@ -59,6 +76,8 @@ class GoogleCalendarService:
                     print(f"⚠️ Error loading saved credentials: {e}")
                     creds = None
 
+        # REST: Continue with existing logic...
+        # (Keep all your existing code from "THIRD: Check if credentials are valid" onwards)
         # THIRD: Check if credentials are valid
         if creds and creds.valid:
             print("✅ Existing credentials are valid!")

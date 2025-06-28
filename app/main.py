@@ -215,6 +215,9 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
                 token_b64 = base64.b64encode(token_json.encode('utf-8')).decode('utf-8')
                 logger.info("💾 Persistent token generated")
                 logger.info(f"📋 GOOGLE_TOKEN_DATA={token_b64}")
+                # FIXED: Also save to environment for immediate use
+                os.environ['GOOGLE_TOKEN_DATA'] = token_b64
+                print(f"🔧 Token saved to environment for immediate use")
             except Exception as e:
                 logger.error(f"⚠️ Error generating persistent token: {e}")
 
