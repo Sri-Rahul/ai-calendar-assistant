@@ -26,10 +26,12 @@ class GoogleCalendarService:
         self._availability_cache = {}
         self._cache_duration = 300  # 5 minutes
         
+
     def authenticate(self, credentials_file: str = "credentials.json", use_web_flow: bool = False):
         """Authenticate with Google Calendar API"""
         creds = None
         
+        # Check if token exists
         if os.path.exists('token.pickle'):
             with open('token.pickle', 'rb') as token:
                 try:
@@ -47,11 +49,31 @@ class GoogleCalendarService:
                     creds = None
 
             if not creds:
+                # FIXED: Handle missing credentials file in production
                 if not os.path.exists(credentials_file):
-                    print(f"Credentials file {credentials_file} not found. Using mock calendar service.")
-                    self.service = MockCalendarService()
-                    self.is_authenticated = True
-                    return
+                    print(f"⚠️ Credentials file {credentials_file} not found.")
+                    # Try to get credentials from environment variables
+                    client_id = os.getenv('GOOGLE_CLIENT_ID')
+                    client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
+                    if client_id and client_secret:
+                        print("🔧 Using credentials from environment variables")
+                        # Create credentials dict from environment
+                        creds_dict = {
+                            "installed": {
+                                "client_id": client_id,
+                                "client_secret": client_secret,
+                                "redirect_uris": ["http://localhost:8080/"],
+                                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                                "token_uri": "https://oauth2.googleapis.com/token"
+                            }
+                        }
+                        # Write temporary credentials file
+                        with open('temp_credentials.json', 'w') as f:
+                            json.dump(creds_dict, f)
+                        credentials_file = 'temp_credentials.json'
+                    else:
+                        print("🎭 Using mock calendar service for production")
+                        return self._use_mock_service()
 
                 try:
                     if use_web_flow:
@@ -98,7 +120,6 @@ class GoogleCalendarService:
                                 print(f"❌ Console auth also failed: {e2}")
                                 print("🎭 Using mock calendar service for testing...")
                                 return self._use_mock_service()
-                                
                 except Exception as e:
                     print(f"❌ Authentication failed: {e}. Using mock calendar service.")
                     return self._use_mock_service()
