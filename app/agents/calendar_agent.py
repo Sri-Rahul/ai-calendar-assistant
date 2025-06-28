@@ -1,9 +1,3 @@
-import pytz
-def get_ist_time() -> datetime:
-    """Get current time in IST"""
-    ist_tz = pytz.timezone('Asia/Kolkata')
-    utc_now = datetime.utcnow()
-    return utc_now.replace(tzinfo=pytz.UTC).astimezone(ist_tz).replace(tzinfo=None)
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
