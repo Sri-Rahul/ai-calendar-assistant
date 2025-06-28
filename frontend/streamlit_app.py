@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, List
 import os
 import pytz
+import time
 
 # Page configuration
 st.set_page_config(
@@ -59,14 +60,14 @@ def get_ist_time() -> datetime:
     return utc_now.replace(tzinfo=pytz.UTC).astimezone(ist_tz).replace(tzinfo=None)
 
 def send_message_to_backend(message: str) -> Dict:
-    """Send message to FastAPI backend"""
+    """Send message to FastAPI backend with startup handling"""
     try:
         # FIXED: Use IST timestamp
         ist_time = get_ist_time()
         payload = {
             "role": "user",
             "content": message,
-            "timestamp": ist_time.isoformat()  # FIXED: IST timestamp
+            "timestamp": ist_time.isoformat()
         }
         
         response = requests.post(
@@ -85,13 +86,205 @@ def send_message_to_backend(message: str) -> Dict:
                 "suggested_times": [],
                 "requires_confirmation": False
             }
+            
+    except requests.exceptions.ReadTimeout as e:
+        # FIXED: Handle backend startup timeout with user-friendly message
+        return handle_backend_startup_error()
+    except requests.exceptions.ConnectTimeout as e:
+        # FIXED: Handle connection timeout (service starting up)
+        return handle_backend_startup_error()
+    except requests.exceptions.ConnectionError as e:
+        error_msg = str(e).lower()
+        if 'timeout' in error_msg or 'timed out' in error_msg:
+            return handle_backend_startup_error()
+        else:
+            return {
+                "message": f"Connection error: {str(e)}. Please check if the backend is running.",
+                "booking_data": None,
+                "suggested_times": [],
+                "requires_confirmation": False
+            }
     except requests.exceptions.RequestException as e:
-        return {
-            "message": f"Connection error: {str(e)}. Please check if the backend is running.",
-            "booking_data": None,
-            "suggested_times": [],
-            "requires_confirmation": False
-        }
+        error_msg = str(e).lower()
+        if 'timeout' in error_msg or 'timed out' in error_msg:
+            return handle_backend_startup_error()
+        else:
+            return {
+                "message": f"Connection error: {str(e)}. Please check if the backend is running.",
+                "booking_data": None,
+                "suggested_times": [],
+                "requires_confirmation": False
+            }
+
+def handle_backend_startup_error() -> Dict:
+    """FIXED: User-friendly message for backend startup delays"""
+    return {
+        "message": "🚀 **Service Starting Up**\n\n"
+                  "The AI Calendar Assistant is waking up from sleep mode. This happens on free hosting services after periods of inactivity.\n\n"
+                  "⏱️ **Please wait 30-60 seconds and try again.**\n\n"
+                  "💡 **What's happening?**\n"
+                  "- The backend service is starting up\n"
+                  "- This usually takes 30-50 seconds\n"
+                  "- Once it's running, responses will be fast\n\n"
+                  "🔄 **Please try sending your message again in a moment!**",
+        "booking_data": None,
+        "suggested_times": [],
+        "requires_confirmation": False,
+        "is_startup_error": True
+    }
+
+def check_backend_health() -> Dict:
+    """Check if backend is healthy and ready"""
+    try:
+        response = requests.get(
+            f"{st.session_state.backend_url}/health",
+            timeout=10
+        )
+        if response.status_code == 200:
+            return {"status": "healthy", "data": response.json()}
+        else:
+            return {"status": "unhealthy", "error": f"Status: {response.status_code}"}
+    except requests.exceptions.RequestException as e:
+        return {"status": "unhealthy", "error": str(e)}
+
+def display_startup_helper():
+    """FIXED: Display helpful startup information"""
+    st.warning("🚀 **Backend Service Starting**")
+    
+    # Create a progress bar simulation
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Simulate startup progress
+    for i in range(101):
+        progress_bar.progress(i)
+        if i < 30:
+            status_text.text("🔄 Waking up the service...")
+        elif i < 60:
+            status_text.text("⚙️ Initializing AI components...")
+        elif i < 90:
+            status_text.text("🔗 Connecting to Google Calendar...")
+        else:
+            status_text.text("✅ Almost ready...")
+        time.sleep(0.5)  # 50 seconds total
+    
+    # Check if service is ready
+    health_status = check_backend_health()
+    
+    if health_status["status"] == "healthy":
+        st.success("✅ **Service is now ready!** You can send your message.")
+        progress_bar.empty()
+        status_text.empty()
+    else:
+        st.warning("⏳ Service still starting up. Please wait a bit more and try again.")
+        progress_bar.empty()
+        status_text.empty()
+
+def enhanced_chat_input_handler():
+    """FIXED: Enhanced chat input with startup detection"""
+    if prompt := st.chat_input("Type your message here... (e.g., 'Schedule a meeting tomorrow at 3 PM')"):
+        # FIXED: Use IST timestamp
+        ist_time = get_ist_time()
+        
+        # Add user message to chat
+        st.session_state.messages.append({
+            "role": "user",
+            "content": prompt,
+            "timestamp": ist_time
+        })
+        
+        # Display user message immediately
+        with st.chat_message("user"):
+            st.markdown(prompt)
+            st.caption(f"🕐 {ist_time.strftime('%I:%M %p')} IST")
+        
+        # Get response from backend with startup handling
+        with st.chat_message("assistant"):
+            with st.spinner("Processing your request..."):
+                response = send_message_to_backend(prompt)
+            
+            # FIXED: Check if this is a startup error
+            if response.get("is_startup_error"):
+                st.markdown(response["message"])
+                
+                # Show startup helper
+                if st.button("🔄 Wait for Service Startup (50 seconds)", key="startup_wait"):
+                    display_startup_helper()
+                
+                # Show manual retry option
+                st.info("💡 **Alternative**: Wait 1-2 minutes and refresh the page, then try again.")
+                
+            else:
+                # Normal response handling
+                st.markdown(response["message"])
+                
+                # Handle response components properly
+                message_index = len(st.session_state.messages)
+                
+                # Check what to display
+                has_booking = response.get("booking_data") and response.get("booking_data", {}).get("id")
+                has_suggestions = response.get("suggested_times") and len(response.get("suggested_times", [])) > 0
+                needs_confirmation = response.get("requires_confirmation", False)
+                
+                # Show booking confirmation if we have a real booking
+                if has_booking:
+                    booking_id = response["booking_data"].get("id", "")
+                    display_booking_confirmation(response["booking_data"], booking_id)
+                    st.session_state.last_booking_message_index = message_index
+                
+                # Show confirmation prompt if needed (and no booking)
+                elif needs_confirmation and not has_booking:
+                    display_confirmation_prompt(message_index)
+                
+                # Show suggested times if available (and no booking or confirmation)
+                elif has_suggestions and not has_booking and not needs_confirmation:
+                    display_suggested_times(response["suggested_times"], message_index)
+                    st.session_state.last_suggestion_message_index = message_index
+        
+        # Add assistant response to session
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": response["message"],
+            "timestamp": ist_time,
+            "booking_data": response.get("booking_data"),
+            "suggested_times": response.get("suggested_times", []),
+            "requires_confirmation": response.get("requires_confirmation", False)
+        })
+
+def display_connection_status():
+    """FIXED: Display connection status in sidebar"""
+    with st.sidebar:
+        st.header("🔗 Connection Status")
+        
+        if st.button("🔍 Test Backend Connection"):
+            with st.spinner("Testing connection..."):
+                health_status = check_backend_health()
+                
+                if health_status["status"] == "healthy":
+                    st.success("✅ Backend is healthy and ready!")
+                    
+                    # Show health details
+                    health_data = health_status.get("data", {})
+                    if health_data:
+                        calendar_status = health_data.get("calendar_status", "unknown")
+                        
+                        if calendar_status == "authenticated":
+                            st.success("📅 Google Calendar: Connected")
+                        elif calendar_status == "mock":
+                            st.warning("📅 Google Calendar: Not connected (using mock)")
+                            st.info("Click [here](https://ai-calendar-assistant-grdx.onrender.com/auth/login) to connect your calendar")
+                        
+                        server_time = health_data.get("server_time", "Unknown")
+                        st.info(f"🕐 Server Time: {server_time}")
+                else:
+                    st.error("❌ Backend connection failed")
+                    st.error(f"Error: {health_status.get('error', 'Unknown error')}")
+                    
+                    # Show startup instructions
+                    st.warning("🚀 **If the service is starting up:**")
+                    st.write("1. Wait 30-60 seconds")
+                    st.write("2. Try the test again")
+                    st.write("3. If it still fails, wait 2 minutes and refresh the page")
 
 def display_booking_confirmation(booking_data: Dict, booking_id: str):
     """Display booking confirmation with controlled balloon animation"""
@@ -358,7 +551,7 @@ def should_show_confirmation(message_index: int, message: Dict) -> bool:
     return True
 
 def main():
-    """Main Streamlit application"""
+    """Main Streamlit application with enhanced startup handling"""
     init_session_state()
     
     # FIXED: Process pending actions at the start of each run
@@ -369,8 +562,17 @@ def main():
     st.title("🤖 AI Calendar Booking Assistant")
     st.write("I can help you schedule appointments, check availability, and manage your calendar!")
     
-    # Sidebar
+    # FIXED: Show startup notice if this is the first visit
+    if len(st.session_state.messages) == 0:
+        st.info("💡 **First time today?** The service might take 30-60 seconds to start up if it's been sleeping. Please be patient!")
+    
+    # Sidebar with connection status
     with st.sidebar:
+        # FIXED: Add connection status
+        display_connection_status()
+        
+        st.divider()
+        
         # Quick actions
         st.header("⚡ Quick Actions")
         
@@ -379,14 +581,14 @@ def main():
             st.session_state.messages.append({
                 "role": "user",
                 "content": quick_message,
-                "timestamp": datetime.now()
+                "timestamp": get_ist_time()
             })
             
             response = send_message_to_backend(quick_message)
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": response["message"],
-                "timestamp": datetime.now(),
+                "timestamp": get_ist_time(),
                 "suggested_times": response.get("suggested_times", [])
             })
             st.rerun()
@@ -396,14 +598,14 @@ def main():
             st.session_state.messages.append({
                 "role": "user",
                 "content": quick_message,
-                "timestamp": datetime.now()
+                "timestamp": get_ist_time()
             })
             
             response = send_message_to_backend(quick_message)
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": response["message"],
-                "timestamp": datetime.now(),
+                "timestamp": get_ist_time(),
                 "suggested_times": response.get("suggested_times", [])
             })
             st.rerun()
@@ -413,14 +615,14 @@ def main():
             st.session_state.messages.append({
                 "role": "user",
                 "content": quick_message,
-                "timestamp": datetime.now()
+                "timestamp": get_ist_time()
             })
             
             response = send_message_to_backend(quick_message)
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": response["message"],
-                "timestamp": datetime.now(),
+                "timestamp": get_ist_time(),
                 "suggested_times": response.get("suggested_times", [])
             })
             st.rerun()
@@ -434,9 +636,7 @@ def main():
             st.session_state.messages = []
             st.session_state.last_booking_message_index = -1
             st.session_state.last_suggestion_message_index = -1
-            # Clear balloon tracking when conversation is cleared
             st.session_state.balloons_shown_for_booking = set()
-            # Clear pending actions
             st.session_state.pending_time_selection = None
             st.session_state.confirmation_pending = None
             st.rerun()
@@ -470,12 +670,11 @@ def main():
                             ts = datetime.fromisoformat(message["timestamp"].replace('Z', '+00:00'))
                         else:
                             ts = message["timestamp"]
-                        # FIXED: Show IST timezone
                         st.caption(f"🕐 {ts.strftime('%I:%M %p')} IST")
                     except:
                         pass
                 
-                # Only show booking confirmation for actual successful bookings with controlled balloons
+                # Only show booking confirmation for actual successful bookings
                 if should_show_booking(message_index, message):
                     booking_id = message["booking_data"].get("id", "")
                     display_booking_confirmation(message["booking_data"], booking_id)
@@ -487,75 +686,39 @@ def main():
                 # Smart time slot display
                 elif should_show_suggestions(message_index, message):
                     display_suggested_times(message["suggested_times"], message_index)
-                
-                # Show helpful message if AI claims booking but no actual booking data
-                elif (message["role"] == "assistant" and
-                      any(phrase in message["content"].lower() for phrase in [
-                          "i've created", "created the event", "added to your calendar", "i've now booked"
-                      ]) and
-                      not message.get("booking_data")):
-                    st.warning("⚠️ **Note**: The assistant claims to have created an event, but no booking confirmation was received. Please check your calendar or try booking again.")
     
-    # Chat input
-    if prompt := st.chat_input("Type your message here... (e.g., 'Schedule a meeting tomorrow at 3 PM')"):
-        # FIXED: Use IST timestamp
-        ist_time = get_ist_time()
-        
-        # Add user message to chat
-        st.session_state.messages.append({
-            "role": "user",
-            "content": prompt,
-            "timestamp": ist_time  # FIXED: IST timestamp
-        })
-        
-        # Display user message immediately
-        with st.chat_message("user"):
-            st.markdown(prompt)
-            st.caption(f"🕐 {ist_time.strftime('%I:%M %p')} IST")  # FIXED: Show IST
-        
-        # Get response from backend
-        with st.chat_message("assistant"):
-            with st.spinner("Processing your request..."):
-                response = send_message_to_backend(prompt)
-            
-            # Display AI response
-            st.markdown(response["message"])
-            
-            # Handle response components properly
-            message_index = len(st.session_state.messages)  # Index for the upcoming assistant message
-            
-            # Check what to display
-            has_booking = response.get("booking_data") and response.get("booking_data", {}).get("id")
-            has_suggestions = response.get("suggested_times") and len(response.get("suggested_times", [])) > 0
-            needs_confirmation = response.get("requires_confirmation", False)
-            
-            # Show booking confirmation if we have a real booking
-            if has_booking:
-                booking_id = response["booking_data"].get("id", "")
-                display_booking_confirmation(response["booking_data"], booking_id)
-                st.session_state.last_booking_message_index = message_index
-            
-            # Show confirmation prompt if needed (and no booking)
-            elif needs_confirmation and not has_booking:
-                display_confirmation_prompt(message_index)
-            
-            # Show suggested times if available (and no booking or confirmation)
-            elif has_suggestions and not has_booking and not needs_confirmation:
-                display_suggested_times(response["suggested_times"], message_index)
-                st.session_state.last_suggestion_message_index = message_index
-        
-        # Add assistant response to session
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response["message"],
-            "timestamp": ist_time,  # FIXED: IST timestamp
-            "booking_data": response.get("booking_data"),
-            "suggested_times": response.get("suggested_times", []),
-            "requires_confirmation": response.get("requires_confirmation", False)
-        })
+    # FIXED: Use enhanced chat input handler
+    enhanced_chat_input_handler()
     
     # Footer with helpful information
-    # (Tips & Examples section removed)
+    with st.expander("💡 Tips & Troubleshooting", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **📅 Booking Examples:**
+            - "Schedule a meeting tomorrow at 3 PM"
+            - "Book a 30-minute call with john@example.com"
+            - "I need a 2-hour workshop next Friday"
+            - "Set up a quick sync for today"
+            """)
+        
+        with col2:
+            st.markdown("""
+            **🔧 Troubleshooting:**
+            - **Timeout errors**: Service is starting up, wait 1 minute
+            - **No response**: Check connection status in sidebar
+            - **Calendar not connected**: Use auth link in sidebar
+            - **Slow responses**: First request after inactivity takes longer
+            """)
+        
+        st.markdown("""
+        **🚀 About Service Startup:**
+        - This app uses free hosting that sleeps after inactivity
+        - First request after sleep takes 30-60 seconds to wake up
+        - Once running, all responses are fast
+        - This is normal behavior for free hosting services
+        """)
 
 if __name__ == "__main__":
     main()
