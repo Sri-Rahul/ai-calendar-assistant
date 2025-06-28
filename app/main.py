@@ -184,66 +184,75 @@ async def auth_callback(code: str = None, state: str = None, error: str = None):
             json.dump(creds_dict, f)
             temp_creds_file = f.name
         
+        flow = Flow.from_client_secrets_file(
+            temp_creds_file,
+            scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
+        )
+        flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
+
+        # Exchange code for token
+        flow.fetch_token(code=code)
+        logger.info("✅ Token exchange successful")
+
+        # Save credentials
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(flow.credentials, token)
+        logger.info("💾 Credentials saved")
+
+        # FIXED: Properly reinitialize calendar agent
+        global calendar_agent
         try:
-            flow = Flow.from_client_secrets_file(
-                temp_creds_file,
-                scopes=['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
-            )
-            flow.redirect_uri = "https://ai-calendar-assistant-grdx.onrender.com/auth/callback"
+            # Reload the calendar service specifically
+            if calendar_agent and hasattr(calendar_agent, 'calendar_service'):
+                logger.info("🔄 Reloading calendar service with new credentials...")
+                calendar_agent.calendar_service.reload_service()
+                logger.info("✅ Calendar service reloaded successfully")
+            else:
+                # Full reinitialize if needed
+                calendar_agent = CalendarBookingAgent()
+                logger.info("🔄 Calendar agent fully reinitialized")
+        except Exception as e:
+            logger.error(f"⚠️ Error reinitializing calendar agent: {e}")
+            # Still continue, service should work now
+
+        return HTMLResponse("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Calendar Connected</title>
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
+                .success { color: #28a745; font-size: 24px; }
+                .container { max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                .btn { background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1 class="success">✅ Calendar Connected Successfully!</h1>
+                <p>Your Google Calendar has been connected to the AI Assistant.</p>
+                <p>You can now:</p>
+                <ul style="text-align: left; margin: 20px 0;">
+                    <li>✅ Book real meetings</li>
+                    <li>✅ Send email invitations</li>
+                    <li>✅ Check availability</li>
+                    <li>✅ Manage your calendar</li>
+                </ul>
+                <a href="/" class="btn">View API Status</a>
+                <p style="margin-top: 20px; color: #666;">You can now use your frontend application!</p>
+            </div>
+            <script>
+                setTimeout(() => window.close(), 5000);
+            </script>
+        </body>
+        </html>
+        """)
             
-            # Exchange code for token
-            flow.fetch_token(code=code)
-            logger.info("✅ Token exchange successful")
-            
-            # Save credentials
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(flow.credentials, token)
-            logger.info("💾 Credentials saved")
-            
-            # Reinitialize calendar agent with new credentials
-            global calendar_agent
-            calendar_agent = CalendarBookingAgent()
-            logger.info("🔄 Calendar agent reinitialized")
-            
-            return HTMLResponse("""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Calendar Connected</title>
-                <style>
-                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
-                    .success { color: #28a745; font-size: 24px; }
-                    .container { max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                    .btn { background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1 class="success">✅ Calendar Connected Successfully!</h1>
-                    <p>Your Google Calendar has been connected to the AI Assistant.</p>
-                    <p>You can now:</p>
-                    <ul style="text-align: left; margin: 20px 0;">
-                        <li>✅ Book real meetings</li>
-                        <li>✅ Send email invitations</li>
-                        <li>✅ Check availability</li>
-                        <li>✅ Manage your calendar</li>
-                    </ul>
-                    <a href="/" class="btn">View API Status</a>
-                    <p style="margin-top: 20px; color: #666;">You can now use your frontend application!</p>
-                </div>
-                <script>
-                    setTimeout(() => window.close(), 5000);
-                </script>
-            </body>
-            </html>
-            """)
-            
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(temp_creds_file)
-            except:
-                pass
+        # Clean up temp file
+        try:
+            os.unlink(temp_creds_file)
+        except Exception:
+            pass
         
     except Exception as e:
         logger.error(f"❌ OAuth callback failed: {e}")

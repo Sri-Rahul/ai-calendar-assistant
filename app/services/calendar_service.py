@@ -27,103 +27,134 @@ class GoogleCalendarService:
         self._cache_duration = 300  # 5 minutes
         
 
+
     def authenticate(self, credentials_file: str = "credentials.json", use_web_flow: bool = False):
-        """Authenticate with Google Calendar API"""
+        """FIXED: Enhanced authentication with proper token checking"""
         creds = None
-        
-        # Check if token exists
+
+        # FIRST: Check if token.pickle exists (from web OAuth)
         if os.path.exists('token.pickle'):
+            print("🔍 Found existing token.pickle file")
             with open('token.pickle', 'rb') as token:
                 try:
                     creds = pickle.load(token)
+                    print("✅ Successfully loaded existing credentials")
                 except Exception as e:
-                    print(f"Error loading saved credentials: {e}")
-
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                try:
-                    creds.refresh(Request())
-                    print("✅ Credentials refreshed successfully!")
-                except Exception as e:
-                    print(f"Error refreshing credentials: {e}")
+                    print(f"⚠️ Error loading saved credentials: {e}")
                     creds = None
 
-            if not creds:
-                # FIXED: Handle missing credentials file in production
-                if not os.path.exists(credentials_file):
-                    print(f"⚠️ Credentials file {credentials_file} not found.")
-                    # Try to get credentials from environment variables
-                    client_id = os.getenv('GOOGLE_CLIENT_ID')
-                    client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-                    if client_id and client_secret:
-                        print("🔧 Using credentials from environment variables")
-                        # Create credentials dict from environment
-                        creds_dict = {
-                            "installed": {
-                                "client_id": client_id,
-                                "client_secret": client_secret,
-                                "redirect_uris": ["http://localhost:8080/"],
-                                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                                "token_uri": "https://oauth2.googleapis.com/token"
-                            }
-                        }
-                        # Write temporary credentials file
-                        with open('temp_credentials.json', 'w') as f:
-                            json.dump(creds_dict, f)
-                        credentials_file = 'temp_credentials.json'
-                    else:
-                        print("🎭 Using mock calendar service for production")
-                        return self._use_mock_service()
+        # SECOND: Check if credentials are valid
+        if creds and creds.valid:
+            print("✅ Existing credentials are valid!")
+            self.credentials = creds
+            try:
+                self.service = build('calendar', 'v3', credentials=creds)
+                self.is_authenticated = True
+                print("🎉 Successfully connected to Google Calendar with existing token!")
+                
+                # Test the connection
+                calendar = self.service.calendars().get(calendarId='primary').execute()
+                print(f"📅 Connected to calendar: {calendar.get('summary', 'Primary Calendar')}")
+                return  # SUCCESS - exit early
+                
+            except Exception as e:
+                print(f"❌ Error building calendar service with existing token: {e}")
+                creds = None
 
+        # THIRD: Try to refresh expired credentials
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                print("🔄 Refreshing expired credentials...")
+                creds.refresh(Request())
+                print("✅ Credentials refreshed successfully!")
+                
+                # Save refreshed credentials
+                with open('token.pickle', 'wb') as token:
+                    pickle.dump(creds, token)
+                
+                self.credentials = creds
+                self.service = build('calendar', 'v3', credentials=creds)
+                self.is_authenticated = True
+                print("🎉 Successfully connected with refreshed credentials!")
+                return  # SUCCESS - exit early
+                
+            except Exception as e:
+                print(f"⚠️ Error refreshing credentials: {e}")
+                creds = None
+
+        # FOURTH: If no valid token, check environment
+        print("🔍 No valid token found, checking environment...")
+        
+        # In PRODUCTION: Don't try OAuth flows, just indicate auth needed
+        if os.getenv('ENVIRONMENT') == 'production':
+            print("🌐 Production environment detected")
+            print("🔗 Authentication required via web OAuth: /auth/login")
+            return self._use_mock_service()
+
+        # FIFTH: For local development, try OAuth flows
+        if not os.path.exists(credentials_file):
+            print(f"⚠️ Credentials file {credentials_file} not found.")
+            
+            # Try to get credentials from environment variables
+            client_id = os.getenv('GOOGLE_CLIENT_ID')
+            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
+            
+            if client_id and client_secret:
+                print("🔧 Creating temporary credentials from environment variables")
+                creds_dict = {
+                    "installed": {
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "redirect_uris": ["http://localhost:8080/"],
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token"
+                    }
+                }
+                
+                with open('temp_credentials.json', 'w') as f:
+                    json.dump(creds_dict, f)
+                credentials_file = 'temp_credentials.json'
+            else:
+                print("🎭 No credentials available, using mock service")
+                return self._use_mock_service()
+
+        # Try OAuth flows (local development only)
+        try:
+            if use_web_flow:
+                print("🌐 Using Web Application OAuth flow...")
+                flow = Flow.from_client_secrets_file(credentials_file, scopes=self.scopes)
+                flow.redirect_uri = 'http://localhost:8080/'
+                auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+                
+                print(f'🔗 Please go to this URL and authorize: {auth_url}')
+                print("📋 After authorization, copy the 'code' parameter from the URL and enter below.")
+                auth_code = input('Enter the authorization code: ').strip()
+                flow.fetch_token(code=auth_code)
+                creds = flow.credentials
+            else:
+                print("🖥️ Using Desktop Application OAuth flow...")
+                flow = InstalledAppFlow.from_client_secrets_file(credentials_file, self.scopes)
+                
                 try:
-                    if use_web_flow:
-                        print("🌐 Using Web Application OAuth flow...")
-                        flow = Flow.from_client_secrets_file(
-                            credentials_file,
-                            scopes=self.scopes
-                        )
-                        flow.redirect_uri = 'http://localhost:8080/'
-                        
-                        auth_url, _ = flow.authorization_url(
-                            prompt='consent',
-                            access_type='offline'
-                        )
-                        print(f'🔗 Please go to this URL and authorize: {auth_url}')
-                        print("📋 After authorization, copy the 'code' parameter from the URL and enter below.")
-                        
-                        auth_code = input('Enter the authorization code: ').strip()
-                        flow.fetch_token(code=auth_code)
-                        creds = flow.credentials
-                    else:
-                        print("🖥️ Using Desktop Application OAuth flow...")
-                        flow = InstalledAppFlow.from_client_secrets_file(
-                            credentials_file, self.scopes
-                        )
-                        
-                        try:
-                            print("🚀 Starting local server for authentication...")
-                            creds = flow.run_local_server(
-                                port=8080,
-                                prompt='consent',
-                                access_type='offline',
-                                success_message='✅ Authentication successful! You can close this window.',
-                                open_browser=True
-                            )
-                            print("✅ Successfully authenticated via local server!")
-                        except Exception as e:
-                            print(f"❌ Local server auth failed: {e}")
-                            try:
-                                print("🔄 Falling back to console authentication...")
-                                creds = flow.run_console()
-                                print("✅ Successfully authenticated via console!")
-                            except Exception as e2:
-                                print(f"❌ Console auth also failed: {e2}")
-                                print("🎭 Using mock calendar service for testing...")
-                                return self._use_mock_service()
+                    print("🚀 Starting local server for authentication...")
+                    creds = flow.run_local_server(
+                        port=8080,
+                        prompt='consent',
+                        access_type='offline',
+                        success_message='✅ Authentication successful! You can close this window.',
+                        open_browser=True
+                    )
+                    print("✅ Successfully authenticated via local server!")
                 except Exception as e:
-                    print(f"❌ Authentication failed: {e}. Using mock calendar service.")
+                    print(f"❌ Local server auth failed: {e}")
+                    print("🎭 Using mock calendar service for local development")
                     return self._use_mock_service()
 
+        except Exception as e:
+            print(f"❌ Authentication failed: {e}. Using mock calendar service.")
+            return self._use_mock_service()
+
+        # Save credentials if successful
         if creds:
             try:
                 with open('token.pickle', 'wb') as token:
@@ -132,35 +163,28 @@ class GoogleCalendarService:
             except Exception as e:
                 print(f"⚠️ Error saving credentials: {e}")
 
-        if creds:
             self.credentials = creds
             try:
                 self.service = build('calendar', 'v3', credentials=creds)
                 self.is_authenticated = True
                 print("✅ Successfully connected to Google Calendar!")
                 
+                # Test connection
                 try:
                     calendar = self.service.calendars().get(calendarId='primary').execute()
                     print(f"📅 Connected to calendar: {calendar.get('summary', 'Primary Calendar')}")
-                    
-                    now = datetime.utcnow().isoformat() + 'Z'
-                    events_result = self.service.events().list(
-                        calendarId='primary',
-                        timeMin=now,
-                        maxResults=1,
-                        singleEvents=True,
-                        orderBy='startTime'
-                    ).execute()
-                    print(f"🔍 API test successful - found {len(events_result.get('items', []))} upcoming events")
-                    
                 except Exception as e:
                     print(f"⚠️ Calendar connection test failed: {e}")
-                    
             except Exception as e:
                 print(f"❌ Error building calendar service: {e}. Using mock calendar service.")
                 return self._use_mock_service()
         else:
             return self._use_mock_service()
+
+    def reload_service(self):
+        """FIXED: Method to reload service after OAuth (called from main.py)"""
+        print("🔄 Reloading calendar service after OAuth...")
+        self.authenticate()
 
     def _use_mock_service(self):
         """Fallback to mock service"""
